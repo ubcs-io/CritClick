@@ -6,6 +6,11 @@ scheduler (systemd timers here) triggers a fresh playthrough every few minutes,
 and each run writes a self-contained manifest for your agentic ingestion
 system to read.
 
+> **Other platforms**
+> - **macOS** (launchd, GUI session required): see [`macos/README.md`](macos/README.md)
+> - **Windows** (Task Scheduler, interactive session required): see [`windows/README.md`](windows/README.md)
+> - **Local dev runs** (no scheduler): see [`docs/DEV_MACOS.md`](../docs/DEV_MACOS.md) / [`docs/DEV_WINDOWS.md`](../docs/DEV_WINDOWS.md)
+
 ---
 
 ## 1. Layout

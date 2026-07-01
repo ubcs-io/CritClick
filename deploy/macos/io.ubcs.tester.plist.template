@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  =============================================================================
+  tester — launchd LaunchAgent template for macOS
+  =============================================================================
+  This schedules a tester playthrough on macOS. Unlike the Linux systemd path,
+  this MUST run in a GUI login session: screen capture (Screen Recording TCC)
+  and input synthesis (Accessibility TCC) only work for processes attached to
+  the interactive desktop.
+
+  USAGE
+  ----
+  1. Copy to ~/Library/LaunchAgents/io.ubcs.tester.<game>.plist
+  2. Replace placeholders:
+       {{GAME}}        short instance name (e.g. mygame)
+       {{CONFIG}}      absolute path to your TOML config
+       {{TESTER_BIN}}  absolute path to the tester executable (venv)
+       {{WORKDIR}}     absolute path to run from (logs/screenshots land here)
+       {{HOUR}}        StartCalendarInterval hour (0-23)
+       {{MINUTE}}      StartCalendarInterval minute (0-59)
+  3. Load:   launchctl load ~/Library/LaunchAgents/io.ubcs.tester.<game>.plist
+  4. Run now: launchctl start io.ubcs.tester.<game>
+  5. Tail logs:
+       tail -f /tmp/tester.<game>.out.log
+       tail -f /tmp/tester.<game>.err.log
+  6. Unload: launchctl unload ~/Library/LaunchAgents/io.ubcs.tester.<game>.plist
+
+  REQUIREMENTS
+  ------------
+  - Grant Screen Recording + Accessibility to the app that owns tester
+    (Terminal.app, iTerm, or the GUI app). See docs/DEV_MACOS.md.
+  - The venv's tester binary must be invoked directly (launchd does not honour
+    shell PATH or activate scripts).
+  - [harness].headless = false in the config (macOS has no Xvfb path here).
+  =============================================================================
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.ubcs.tester.{{GAME}}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{TESTER_BIN}}</string>
+        <string>--config</string>
+        <string>{{CONFIG}}</string>
+        <string>--run-id</string>
+        <string>$(date +%Y%m%dT%H%M%S)</string>
+        <string>--runs-dir</string>
+        <string>{{WORKDIR}}/runs</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>{{WORKDIR}}</string>
+
+    <!-- Run daily at the specified time -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>{{HOUR}}</integer>
+        <key>Minute</key>
+        <integer>{{MINUTE}}</integer>
+    </dict>
+
+    <!-- Standard output / error go here -->
+    <key>StandardOutPath</key>
+    <string>/tmp/tester.{{GAME}}.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/tester.{{GAME}}.err.log</string>
+
+    <!-- Don't relaunch on crash; the calendar interval will retry next day -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <!-- Allow the agent to access the GUI session for capture/input -->
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

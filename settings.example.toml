@@ -44,7 +44,9 @@ wait_after_action = 1.5
 stuck_threshold = 3
 # Coordinate scale factor (for OS DPI / resolution mismatches)
 screen_scale = 1.0
-# Attempt to use virtual display (Linux + Xvfb)
+# Headless mode: use a virtual display (Linux + Xvfb). Set to false on
+# macOS/Windows dev machines so the game window renders to the real desktop.
+# When false, DISPLAY is left untouched and Godot's --no-window is omitted.
 headless = false
 # Seconds to pause when the LLM returns a 'wait' action
 wait_duration = 2.0

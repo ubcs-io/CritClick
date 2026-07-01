@@ -1,6 +1,6 @@
 # tester — Vision-Based Autonomous Game Testing Harness
 
-**tester** is a vision-driven game testing framework. It captures your game's screen, sends it to any **OpenAI-compatible vision LLM endpoint**, parses structured JSON responses, executes mouse/keyboard actions, and maintains a structured playthrough log — with retries, safety guards, and report generation.
+**tester** is a vision-driven, local-first game testing framework. It captures your game's screen, sends it to any **OpenAI-compatible vision LLM endpoint**, parses structured JSON responses, executes mouse/keyboard actions, and maintains a structured playthrough log — with retries, safety guards, and report generation.
 
 Supports **Ren'Py**, **Godot**, and **custom executables** out of the box.
 
@@ -85,6 +85,25 @@ invocation exits cleanly with code 4 (`EXIT_LOCKED`).
 
 For a complete headless-Linux deployment guide with systemd timers and Xvfb,
 see **[deploy/README.md](deploy/README.md)**.
+
+---
+
+## 💻 Local Development (macOS / Windows)
+
+You can run `tester` interactively on a dev machine — the game renders to
+your real desktop instead of an Xvfb virtual display. Set
+`[harness].headless = false` and follow the platform-specific guide:
+
+- **macOS** — requires **Screen Recording** and **Accessibility** permissions;
+  see **[docs/DEV_MACOS.md](docs/DEV_MACOS.md)**.
+- **Windows** — mind UAC integrity level and Defender/SmartScreen;
+  see **[docs/DEV_WINDOWS.md](docs/DEV_WINDOWS.md)**.
+
+Quick sanity check before a real playthrough:
+
+```bash
+tester --self-test --config my_game.toml   # verify capture + input permissions
+```
 
 ---
 
@@ -261,7 +280,8 @@ tests/
 ├── test_prompts.py # Prompt generation tests
 └── test_runs.py    # Run namespacing + manifest + git capture tests
 
-deploy/             # Scheduled deployment templates (systemd + Xvfb guide)
+deploy/             # Scheduled deployment templates (systemd, launchd, Task Scheduler)
+docs/               # Platform dev guides (DEV_MACOS.md, DEV_WINDOWS.md)
 ```
 
 ---
@@ -272,6 +292,7 @@ deploy/             # Scheduled deployment templates (systemd + Xvfb guide)
 - **Swap the LLM client**: Implement `LLMClient` (e.g., Anthropic, Gemini, local model)
 - **Custom prompts**: Set `system_prompt` / `user_prompt_template` in your TOML config
 - **Headless CI**: Install `python-xlib` and use `headless = true` with Xvfb on Linux
+- **Desktop dev runs**: Set `headless = false` on macOS/Windows (see `docs/`)
 
 ---
 

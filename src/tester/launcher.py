@@ -69,8 +69,12 @@ def capture_git_info(path: str | os.PathLike) -> dict:
 class Launcher(ABC):
     """Abstract base for game launchers."""
 
-    def __init__(self, config: GameConfig) -> None:
+    def __init__(self, config: GameConfig, headless: bool = True) -> None:
         self.config = config
+        # ``headless`` selects the Linux virtual-display (Xvfb) code path.
+        # On macOS/Windows dev machines the game renders to the real desktop,
+        # so callers should pass ``headless=False`` (or set [harness].headless).
+        self.headless = headless
         self.process: subprocess.Popen | None = None
 
     # ------------------------------------------------------------------
@@ -92,9 +96,10 @@ class Launcher(ABC):
         cmd = self.build_command(exe)
         logger.info(f"🚀 Launching: {' '.join(shlex.quote(p) for p in cmd)}")
 
-        # On Linux with headless mode, set up DISPLAY
         env = os.environ.copy()
-        if self.config.resolution:
+        # Only touch DISPLAY on Linux headless runs (Xvfb). On macOS/Windows
+        # the game renders to the interactive desktop and DISPLAY is ignored.
+        if sys.platform == "linux" and self.headless and self.config.resolution:
             env.setdefault("DISPLAY", ":0")
 
         self.process = subprocess.Popen(
@@ -258,7 +263,11 @@ class GodotLauncher(Launcher):
             cmd.append(str(game_path))
 
         w, h = self.config.resolution or (1280, 720)
-        cmd += ["--resolution", f"{w}x{h}", "--fullscreen", "--no-window"]  # may conflict; user can override via args
+        cmd += ["--resolution", f"{w}x{h}", "--fullscreen"]
+        # `--no-window` is a headless-Linux concern. On a dev machine we want
+        # the window visible so the user can watch the playthrough.
+        if self.headless:
+            cmd.append("--no-window")  # may conflict; user can override via args
         cmd += self.config.args
 
         return cmd
@@ -293,12 +302,19 @@ _LAUNCHER_MAP = {
 }
 
 
-def create_launcher(config: GameConfig) -> Launcher:
-    """Factory: return the appropriate Launcher for the given game config."""
+def create_launcher(config: GameConfig, headless: bool = True) -> Launcher:
+    """Factory: return the appropriate Launcher for the given game config.
+
+    Args:
+        config: Game configuration.
+        headless: When True (default, for Linux servers), use the Xvfb/headless
+            code path. Pass False for interactive macOS/Windows dev runs so the
+            game window is visible and DISPLAY is left untouched.
+    """
     cls = _LAUNCHER_MAP.get(config.type)
     if cls is None:
         raise ValueError(
             f"Unsupported game type: '{config.type}'. "
             f"Supported types: {list(_LAUNCHER_MAP)}"
         )
-    return cls(config)
+    return cls(config, headless=headless)

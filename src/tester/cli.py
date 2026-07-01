@@ -80,6 +80,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run the analysis loop without launching the game or executing actions.",
     )
     parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help=(
+            "Verify screen capture and input permissions work on this machine, "
+            "then exit. Useful on macOS/Windows dev machines to catch missing "
+            "TCC / accessibility permissions before a real playthrough."
+        ),
+    )
+    parser.add_argument(
         "--report",
         type=str,
         default=None,
@@ -230,7 +239,7 @@ def cmd_check(settings: Settings) -> int:
     # 2. Executable resolves
     print("\n🔎 Checking game executable…")
     try:
-        launcher = create_launcher(settings.game)
+        launcher = create_launcher(settings.game, headless=settings.harness.headless)
         exe = launcher.resolve_executable()
         print(f"✅ Executable found: {exe}")
     except (ValueError, FileNotFoundError) as exc:
@@ -355,6 +364,94 @@ def cmd_report(logfile: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Self-test
+# ---------------------------------------------------------------------------
+
+def cmd_self_test(settings: Settings | None) -> int:
+    """Verify screen capture and input synthesis work on this machine.
+
+    Returns 0 if both pathways are functional, 1 otherwise. On macOS this
+    catches missing Screen Recording / Accessibility TCC grants; on Windows
+    it catches integrity-level mismatches indirectly (input silently no-ops).
+    """
+    import platform
+    import sys as _sys
+
+    print(f"tester self-test on {platform.platform()}")
+    print()
+
+    scale = settings.harness.screen_scale if settings else 1.0
+    ok = True
+
+    # 1. Screen capture
+    print("🔎 Testing screen capture (mss / pyautogui)…")
+    try:
+        from .screen import Capturer
+
+        capturer = Capturer(scale=scale)
+        img = capturer.capture_pil()
+        w, h = img.size
+        # Heuristic: an all-black capture often indicates a permission issue
+        # (especially on macOS where TCC denial returns a black frame, not an
+        # exception). Sample a few pixels; if every sampled pixel is identical,
+        # warn.
+        samples = [img.getpixel((w // 4, h // 4)), img.getpixel((w // 2, h // 2)),
+                   img.getpixel((3 * w // 4, 3 * h // 4))]
+        all_same = len(set(samples)) == 1
+
+        print(f"✅ Capture OK — {w}x{h} via {('mss' if capturer._mss_available else 'pyautogui')}.")
+        if all_same and all(s == samples[0] for s in samples):
+            # Single-color screen is suspicious on a real desktop
+            print(f"⚠️  Captured frame is a uniform color ({samples[0]}).")
+            if _sys.platform == "darwin":
+                print("   On macOS this usually means Screen Recording permission")
+                print("   was not granted to the terminal/IDE. See docs/DEV_MACOS.md.")
+            else:
+                print("   This may indicate a headless/display issue or a blank screen.")
+        print(f"   Saved sample to: tester_selftest_capture.png")
+        img.save("tester_selftest_capture.png")
+    except Exception as exc:
+        print(f"❌ Capture failed: {exc}")
+        if _sys.platform == "darwin":
+            print("   Grant Screen Recording permission and relaunch the terminal/IDE.")
+        ok = False
+
+    # 2. Input synthesis
+    print("\n🔎 Testing input synthesis (pyautogui)…")
+    try:
+        import pyautogui
+
+        # size() is a safe, non-destructive call that exercises the backend
+        size = pyautogui.size()
+        print(f"✅ pyautogui OK — screen reported as {size.width}x{size.height}.")
+        if _sys.platform == "darwin":
+            print("   (Accessibility permission grants mouse/keyboard control.)")
+    except Exception as exc:
+        print(f"❌ pyautogui failed: {exc}")
+        if _sys.platform == "darwin":
+            print("   Grant Accessibility permission and relaunch the terminal/IDE.")
+        ok = False
+
+    # 3. Platform-specific guidance
+    print()
+    if _sys.platform == "darwin":
+        print("ℹ️  macOS: System Settings → Privacy & Security →")
+        print("     • Screen Recording  — add the app running tester")
+        print("     • Accessibility     — add the app running tester")
+        print("   Then quit and relaunch that app. See docs/DEV_MACOS.md.")
+    elif _sys.platform == "win32":
+        print("ℹ️  Windows: if input silently fails, check that tester and the")
+        print("   game run at the same UAC integrity level. See docs/DEV_WINDOWS.md.")
+
+    print()
+    if ok:
+        print("✅ Self-test passed — capture and input pathways are working.")
+        return 0
+    print("❌ Self-test found issues. Fix the above before running a playthrough.")
+    return 1
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -380,6 +477,15 @@ def main(argv: list[str] | None = None) -> None:
     if args.report:
         exit_code = cmd_report(args.report)
         sys.exit(exit_code)
+
+    # --self-test: verify capture + input permissions, then exit.
+    # Doesn't strictly need a config, but uses [harness].screen_scale if present.
+    if args.self_test:
+        try:
+            settings = load_settings(args)
+        except Exception:
+            settings = None  # self-test can run without a config
+        sys.exit(cmd_self_test(settings))
 
     # Load settings (from TOML, env vars, or both)
     try:
@@ -422,7 +528,7 @@ def main(argv: list[str] | None = None) -> None:
         launcher = _StubLauncher(settings.game)
     else:
         try:
-            launcher = create_launcher(settings.game)
+            launcher = create_launcher(settings.game, headless=settings.harness.headless)
         except (ValueError, FileNotFoundError) as exc:
             logger.error("Failed to create game launcher: %s", exc)
             sys.exit(1)
