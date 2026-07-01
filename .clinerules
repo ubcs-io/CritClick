@@ -1,0 +1,14 @@
+# Project rules for Cline
+
+## CI / GitHub Workflows
+
+- **DO NOT add or modify files under `.github/workflows/`.**
+  The current Git Personal Access Token (PAT) does **not** have the `workflow`
+  scope, so any push that touches a workflow file is rejected by GitHub:
+  > refusing to allow a Personal Access Token to create or update workflow
+  > `.github/workflows/<file>` without `workflow` scope
+
+  Until a token with `workflow` scope is available, keep all CI/automation
+  out of `.github/workflows/`. If CI guidance is needed, document it in
+  `README.md` or `docs/` as a suggested snippet the user can add manually,
+  rather than committing the file.

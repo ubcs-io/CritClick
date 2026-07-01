@@ -1,3 +1,18 @@
+# Suggested CI configuration (not committed)
+
+> **Why this is a doc, not a workflow file**
+> The repo's current Git Personal Access Token (PAT) lacks the `workflow`
+> scope, so GitHub rejects any push that adds or modifies files under
+> `.github/workflows/`. Until a token with that scope is available, CI is
+> documented here as a suggested snippet for a project maintainer to add
+> manually. See `.clinerules` for the full policy.
+
+This is the CI matrix that `tester` is designed to pass. To enable it,
+create `.github/workflows/ci.yml` by hand with the contents below.
+
+## Suggested `.github/workflows/ci.yml`
+
+```yaml
 name: CI
 
 on:
@@ -25,9 +40,6 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        # Linux runners are headless: install Xvfb + python-xlib so the
-        # capture/input backends can be exercised. macOS/Windows runners
-        # have a real desktop session available.
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
@@ -60,10 +72,19 @@ jobs:
         shell: bash
 
       - name: Self-test (capture/input sanity check)
-        # On macOS/Windows this verifies the capture/input backends work in
-        # the runner's desktop session. On Linux it's covered by the
-        # Xvfb-wrapped pytest run above.
         if: runner.os != 'Linux'
         run: tester --self-test || true
         shell: bash
         continue-on-error: true
+```
+
+## Notes
+
+- **Linux** runs under `xvfb-run` (headless path) with `python-xlib` and the
+  `headless` extra installed.
+- **macOS / Windows** run in the runner's real desktop session and also
+  exercise `tester --self-test` to confirm the capture/input backends work
+  there.
+- `mypy` and `--self-test` are kept non-blocking (`continue-on-error`) so
+  they surface information without failing the build while the Windows/macOS
+  capture paths are still being hardened.

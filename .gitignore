@@ -78,6 +78,13 @@ screenshots/
 !README.md
 !CHANGELOG.md
 !CONTRIBUTING.md
+!docs/**
+!deploy/**
+
+# =============================================================================
+# CI / GitHub Workflows — PAT lacks `workflow` scope; see .clinerules
+# =============================================================================
+.github/workflows/
 
 # =============================================================================
 # Config files with secrets
