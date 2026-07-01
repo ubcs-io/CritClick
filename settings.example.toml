@@ -1,0 +1,60 @@
+# =============================================================================
+# tester — example configuration
+# =============================================================================
+# Copy this file to my_game.toml and edit the values below.
+# Environment variables (TESTER_*) take precedence over values in this file.
+# =============================================================================
+
+[llm]
+# Any OpenAI-compatible endpoint: OpenAI, Azure, vLLM, Ollama, LiteLLM, etc.
+api_base = "https://api.openai.com/v1"
+# API key (or set TESTER_LLM__API_KEY or OPENAI_API_KEY env var)
+api_key = "sk-..."
+# Vision-capable model to use
+model = "gpt-4o"
+# Max tokens for LLM response
+max_tokens = 600
+# Low temperature for deterministic UI interactions
+temperature = 0.1
+
+[game]
+# Engine type: "renpy", "godot", or "custom"
+type = "renpy"
+# Path to game directory (or executable for custom games)
+path = "./my_game"
+# Optional: override auto-detected executable name
+# executable = "renpy.sh"
+# Game window resolution [width, height]
+resolution = [1280, 720]
+# Run "git pull --rebase" before launching (requires git repo)
+git_pull = false
+# Additional CLI arguments passed to the game executable
+# args = ["--debug"]
+
+[harness]
+# Maximum number of LLM calls (steps) per playthrough
+max_steps = 50
+# Seconds to pause after executing each action
+wait_after_action = 1.5
+# Number of repeated identical actions before stuck warning
+stuck_threshold = 3
+# Coordinate scale factor (for OS DPI / resolution mismatches)
+screen_scale = 1.0
+# Attempt to use virtual display (Linux + Xvfb)
+headless = false
+
+[logging]
+# Path to structured JSONL log file
+log_file = "playthrough_log.jsonl"
+# Save per-step screenshots
+save_screenshots = true
+# Directory for saved screenshots
+screenshot_dir = "screenshots"
+# Number of recent narrative entries to include in LLM context
+context_window_size = 3
+# Log level: DEBUG, INFO, WARNING, ERROR
+log_level = "INFO"
+
+# Optional: Override prompt templates
+# system_prompt = "You are playing a custom game. ..."
+# user_prompt_template = "Current context: {context}\nAnalyze the screen..."
