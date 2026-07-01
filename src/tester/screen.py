@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 from io import BytesIO
-from typing import Optional
 
 from PIL import Image
 
@@ -35,7 +34,7 @@ class Capturer:
         try:
             import mss
 
-            self._mss = mss.mss()
+            self._mss = mss.MSS()
             self._mss_available = True
             logger.debug("Using mss for screen capture.")
         except ImportError:

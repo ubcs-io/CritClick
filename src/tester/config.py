@@ -10,13 +10,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .models import GameConfig
-
 
 # ---------------------------------------------------------------------------
 # LLM settings
@@ -32,7 +31,7 @@ class LLMSettings(BaseModel):
             "Change to point at any compatible endpoint: Azure, vLLM, Ollama, LiteLLM, etc."
         ),
     )
-    api_key: Optional[str] = Field(
+    api_key: str | None = Field(
         default=None,
         description=(
             "API key for the endpoint. If omitted, the client will look for the "
@@ -45,6 +44,14 @@ class LLMSettings(BaseModel):
     )
     max_tokens: int = Field(default=600, ge=1, le=16384)
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
+    max_retries: int = Field(
+        default=3, ge=0,
+        description="Maximum number of retries for transient LLM failures (rate limits, timeouts).",
+    )
+    retry_delay: float = Field(
+        default=2.0, ge=0.0,
+        description="Base delay in seconds for exponential backoff between retries.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +77,14 @@ class HarnessSettings(BaseModel):
     headless: bool = Field(
         default=False,
         description="If True, attempt to run on a virtual display (Linux + Xvfb).",
+    )
+    wait_duration: float = Field(
+        default=2.0, ge=0.0,
+        description="Seconds to pause when the LLM returns a 'wait' action.",
+    )
+    startup_countdown: bool = Field(
+        default=True,
+        description="If True, print a 3-second countdown before launching the game.",
     )
 
 
@@ -109,11 +124,11 @@ class Settings(BaseSettings):
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
 
     # Prompt overrides (optional — use defaults if omitted)
-    system_prompt: Optional[str] = Field(
+    system_prompt: str | None = Field(
         default=None,
         description="Override the default system prompt for the LLM.",
     )
-    user_prompt_template: Optional[str] = Field(
+    user_prompt_template: str | None = Field(
         default=None,
         description="Override the default user prompt template. Use {context} as placeholder.",
     )
@@ -130,14 +145,18 @@ class Settings(BaseSettings):
     @classmethod
     def from_toml(cls, path: str | Path) -> Settings:
         """Load settings from a TOML file, then apply env var overrides."""
-        import tomli
+        # Python 3.11+ has tomllib built in; fall back to tomli for 3.10
+        try:
+            import tomllib
+        except ModuleNotFoundError:
+            import tomli as tomllib  # type: ignore[no-redef]
 
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"Config file not found: {path}")
 
         with open(path, "rb") as fh:
-            raw = tomli.load(fh)
+            raw = tomllib.load(fh)
 
         return cls(**raw)
 
@@ -146,7 +165,7 @@ class Settings(BaseSettings):
         """Create settings purely from environment variables (no TOML file)."""
         return cls()  # Uses env prefix TESTER_ to pick up vars
 
-    def effective_api_key(self) -> Optional[str]:
+    def effective_api_key(self) -> str | None:
         """Return the API key with fallback chain: config → env var → None."""
         if self.llm.api_key:
             return self.llm.api_key

@@ -16,6 +16,10 @@ model = "gpt-4o"
 max_tokens = 600
 # Low temperature for deterministic UI interactions
 temperature = 0.1
+# Max retries for transient LLM failures (rate limits, timeouts)
+max_retries = 3
+# Base delay in seconds for exponential backoff between retries
+retry_delay = 2.0
 
 [game]
 # Engine type: "renpy", "godot", or "custom"
@@ -42,6 +46,10 @@ stuck_threshold = 3
 screen_scale = 1.0
 # Attempt to use virtual display (Linux + Xvfb)
 headless = false
+# Seconds to pause when the LLM returns a 'wait' action
+wait_duration = 2.0
+# Show a 3-second countdown with failsafe reminder before launching
+startup_countdown = true
 
 [logging]
 # Path to structured JSONL log file

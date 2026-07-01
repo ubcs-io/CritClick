@@ -1,0 +1,27 @@
+# =============================================================================
+# tester@.timer — schedule playthroughs every 5 minutes (with jitter)
+# =============================================================================
+# Pairs with tester@.service. Same instance name, e.g.:
+#   sudo systemctl enable --now tester@my_game.timer
+#
+# The timer fires every 5 minutes with up to 1 minute of jitter so that
+# multiple game configs don't all start on the same wall-clock tick.
+#
+# If a previous run is still in progress, the lock file in the service unit
+# makes the new invocation exit cleanly with code 4 (EXIT_LOCKED) instead of
+# fighting the prior run for the virtual display.
+# =============================================================================
+
+[Unit]
+Description=Run tester playthrough every 5 minutes (%i)
+Requires=tester@%i.service
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+RandomizedDelaySec=60s
+Unit=tester@%i.service
+
+[Install]
+WantedBy=timers.target

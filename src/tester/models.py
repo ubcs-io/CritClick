@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -14,6 +13,7 @@ class ActionType(str, Enum):
     CLICK = "click"
     WAIT = "wait"
     TYPE = "type"
+    PRESS = "press"
     DONE = "done"
 
 
@@ -35,9 +35,16 @@ class ActionResponse(BaseModel):
         description="(x, y) pixel coordinates relative to top-left of the game window. "
         "Required for 'click' actions. May be empty for 'wait'/'done'.",
     )
-    text_to_type: Optional[str] = Field(
+    text_to_type: str | None = Field(
         None,
         description="Text to input for 'type' actions. Ignored otherwise.",
+    )
+    key_to_press: str | None = Field(
+        None,
+        description=(
+            "Single key to press for 'press' actions (e.g. 'enter', 'escape', 'space'). "
+            "Ignored otherwise."
+        ),
     )
     reasoning: str = Field(
         ...,
@@ -56,10 +63,13 @@ class LogEntry(BaseModel):
     step: int
     timestamp: str
     llm_response: ActionResponse
+    duration_ms: int = Field(
+        default=0, ge=0, description="Milliseconds spent on the LLM call for this step."
+    )
     image_hex_truncated: str = Field(
         ..., description="First 200 chars of the base64-encoded screenshot for traceability."
     )
-    screenshot_path: Optional[str] = None
+    screenshot_path: str | None = None
 
 
 class GameConfig(BaseModel):
@@ -71,7 +81,7 @@ class GameConfig(BaseModel):
     path: str = Field(
         ..., description="Path to the game directory or executable."
     )
-    executable: Optional[str] = Field(
+    executable: str | None = Field(
         None,
         description=(
             "Override executable name/path. For Ren'Py: 'renpy.sh'/'renpy.exe'. "

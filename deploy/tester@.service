@@ -1,0 +1,63 @@
+# =============================================================================
+# tester@.service — systemd service template for scheduled playthroughs
+# =============================================================================
+# Instantiated per config file. %i expands to the instance name passed by the
+# matching tester@.timer unit. Convention: name your config
+# /etc/tester/<instance>.toml, e.g. /etc/tester/my_game.toml.
+#
+# Install:
+#   sudo cp deploy/tester@.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#
+# Run once manually:
+#   sudo systemctl start tester@my_game
+#
+# View logs:
+#   journalctl -u tester@my_game -f
+# =============================================================================
+
+[Unit]
+Description=tester autonomous playthrough (%i)
+Wants=Xvfb.service
+After=network-online.target Xvfb.service
+
+[Service]
+Type=oneshot
+User=tester
+Group=tester
+
+# Working directory holds the runs/ output tree. Agentic ingestion reads here.
+WorkingDirectory=/var/lib/tester
+
+# Resolve config by instance name. Override path layout to suit your install.
+Environment=TESTER_CONFIG_DIR=/etc/tester
+
+# Virtual display set up by Xvfb.service (headless server, no monitor).
+Environment=DISPLAY=:99
+
+# Run the playthrough. The run-id is a UTC timestamp so runs are sortable
+# and never collide. The lock file prevents overlap if a run overruns its slot.
+ExecStart=/usr/bin/env bash -c '/usr/local/bin/tester \
+    --config "${TESTER_CONFIG_DIR}/%i.toml" \
+    --runs-dir /var/lib/tester/runs \
+    --lock-file /run/tester/%i.lock \
+    --run-id "$$(date -u +%Y%m%dT%H%M%SZ)"'
+
+# Hard cap per run so a stuck playthrough can't hold the display forever.
+TimeoutStartSec=1800
+
+# Clean exit codes: 0 success, 3 game died (still a "completed" run),
+# 4 locked (skipped because previous run overlapped). Do not restart those.
+SuccessExitStatus=0 3 4
+
+# Real failures (2 = runtime error) should surface — let systemd log them.
+Restart=no
+
+# Sandbox hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/tester /run/tester
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

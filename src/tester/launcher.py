@@ -13,17 +13,57 @@ import logging
 import os
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional
 
 from .models import GameConfig
 
 logger = logging.getLogger("tester.launcher")
+
+
+def capture_git_info(path: str | os.PathLike) -> dict:
+    """Return ``{commit, branch, dirty}`` for the git repo containing *path*.
+
+    Gracefully handles missing git, non-repo directories, and command failures
+    by returning ``None`` for any field that can't be determined. Designed for
+    inclusion in a run manifest so playthroughs can be correlated to code state.
+    """
+    info: dict[str, str | bool | None] = {"commit": None, "branch": None, "dirty": None}
+    repo = Path(path)
+    if repo.is_file():
+        repo = repo.parent
+
+    def _git(*args: str) -> str | None:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=str(repo),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
+
+    # Walk up until we find a .git dir (rev-parse handles this centrally)
+    rev_parse = _git("rev-parse", "--show-toplevel")
+    if rev_parse is None:
+        return info
+    repo = Path(rev_parse)
+
+    commit = _git("rev-parse", "HEAD")
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD")
+    status = _git("status", "--porcelain")
+    info["commit"] = commit
+    info["branch"] = branch
+    info["dirty"] = bool(status)
+    return info
 
 
 class Launcher(ABC):
@@ -31,7 +71,7 @@ class Launcher(ABC):
 
     def __init__(self, config: GameConfig) -> None:
         self.config = config
-        self.process: Optional[subprocess.Popen] = None
+        self.process: subprocess.Popen | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle

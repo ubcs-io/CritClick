@@ -19,6 +19,7 @@ Available actions:
 - "click"   — Click at specific (x, y) coordinates (for buttons, menu items, choices)
 - "wait"    — Pause and wait for animations, scene transitions, or dialogue to complete
 - "type"    — Type text into an input field (provide the text in text_to_type)
+- "press"   — Press a single key (provide the key name in key_to_press, e.g. 'enter', 'escape', 'space')
 - "done"    — The game has reached a natural end point (credits, game over, or main menu)
 
 Guidelines:

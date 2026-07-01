@@ -1,8 +1,6 @@
-"""Allow ``python -m tester`` as an entry point.
-
-Simply delegates to ``tester.cli.main()``.
-"""
+"""Enable ``python -m tester``."""
 
 from .cli import main
 
-main()
+if __name__ == "__main__":
+    main()
