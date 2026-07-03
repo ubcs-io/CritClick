@@ -210,15 +210,11 @@ class RenPyLauncher(Launcher):
         )
 
     def build_command(self, executable: str) -> list[str]:
-        w, h = self.config.resolution or (1280, 720)
-        cmd = [
-            executable,
-            self.config.path,
-            "--window",
-            "--size", f"{w}x{h}",
-            "--nodaemon",
-            *self.config.args,
-        ]
+        cmd = [executable, self.config.path]
+        if self.config.resolution:
+            w, h = self.config.resolution
+            cmd += ["--size", f"{w}x{h}"]
+        cmd += self.config.args
         return cmd
 
 

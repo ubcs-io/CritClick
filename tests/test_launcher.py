@@ -24,9 +24,8 @@ class TestRenpyLauncher:
         launcher = RenPyLauncher(config)
         cmd = launcher.build_command("/fake/game/renpy.sh")
         assert cmd[0] == "/fake/game/renpy.sh"
-        assert "--window" in cmd
-        assert "--nodaemon" in cmd
-
+        assert "/fake/game" in cmd
+        assert "--size" in cmd
 
 class TestGodotLauncher:
     def test_build_command_with_project_dir(self, tmp_path):
