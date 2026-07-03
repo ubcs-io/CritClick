@@ -1,8 +1,8 @@
-# tester — Vision-Based Autonomous Game Testing Harness
+# Vision-Based Autonomous Game Testing Harness
 
-**tester** is a vision-driven, local-first game testing framework. It captures your game's screen, sends it to any **OpenAI-compatible vision LLM endpoint**, parses structured JSON responses, executes mouse/keyboard actions, and maintains a structured playthrough log — with retries, safety guards, and report generation.
+**Critical Click** is a vision-driven, local-first game testing framework. It captures your game's screen, sends it to any **OpenAI-compatible vision LLM endpoint**, parses structured JSON responses, executes mouse/keyboard actions, and maintains a structured playthrough log — with retries, safety guards, and report generation.
 
-Supports **Ren'Py**, **Godot**, and **custom executables** out of the box.
+Supports **Godot**, **Ren'Py**, and **custom executables** out of the box.
 
 ---
 
