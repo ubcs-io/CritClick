@@ -168,6 +168,7 @@ class Harness:
                     logger.warning("⚠️  Game process died unexpectedly.")
                     self.completion_reason = "game_died"
                     exit_code = EXIT_GAME_DIED
+                    self._log_game_output()
                     break
 
                 result = self.analyze_and_act()
@@ -202,6 +203,39 @@ class Harness:
         if not self.dry_run:
             self.launcher.stop()
         logger.info("🛑 Harness stopped.")
+
+    def _log_game_output(self) -> None:
+        """Read and log any stdout/stderr produced by the game process.
+
+        Called when the game process dies unexpectedly so that error messages
+        that would otherwise be swallowed are surfaced in the log.
+        """
+        process = self.launcher.process
+        if process is None:
+            return
+
+        # If the process hasn't been reaped yet, read the captured pipes
+        stdout, stderr = process.communicate()
+        if stdout:
+            try:
+                stdout_text = stdout.decode("utf-8", errors="replace")
+            except Exception:
+                stdout_text = str(stdout)
+            if stdout_text.strip():
+                logger.info(
+                    "📤 Game stdout:\n%s",
+                    stdout_text[-4000:],
+                )
+        if stderr:
+            try:
+                stderr_text = stderr.decode("utf-8", errors="replace")
+            except Exception:
+                stderr_text = str(stderr)
+            if stderr_text.strip():
+                logger.info(
+                    "📥 Game stderr:\n%s",
+                    stderr_text[-4000:],
+                )
 
     # ------------------------------------------------------------------
     # Safety

@@ -31,6 +31,45 @@ class TestLLMSettings:
         assert s.max_retries == 5
         assert s.retry_delay == 0.5
 
+    def test_block_external_routing_default(self):
+        s = LLMSettings()
+        assert s.block_external_routing is False
+
+    def test_block_external_routing_localhost_accepted(self):
+        s = LLMSettings(
+            api_base="http://localhost:11434/v1",
+            block_external_routing=True,
+        )
+        assert s.block_external_routing is True
+
+    def test_block_external_routing_loopback_ip_accepted(self):
+        s = LLMSettings(
+            api_base="http://127.0.0.1:8000/v1",
+            block_external_routing=True,
+        )
+        assert s.block_external_routing is True
+
+    def test_block_external_routing_public_ip_rejected(self):
+        with pytest.raises(Exception):
+            LLMSettings(
+                api_base="https://api.openai.com/v1",
+                block_external_routing=True,
+            )
+
+    def test_block_external_routing_private_ip_accepted(self):
+        s = LLMSettings(
+            api_base="http://192.168.1.100:11434/v1",
+            block_external_routing=True,
+        )
+        assert s.block_external_routing is True
+
+    def test_block_external_routing_disabled_allows_public(self):
+        s = LLMSettings(
+            api_base="https://api.openai.com/v1",
+            block_external_routing=False,
+        )
+        assert s.block_external_routing is False
+
 
 class TestHarnessSettings:
     def test_defaults(self):

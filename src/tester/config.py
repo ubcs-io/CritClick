@@ -18,6 +18,30 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from .models import GameConfig
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _resolve_ip(hostname: str) -> "ipaddress.IPv4Address | ipaddress.IPv6Address | None":
+    """Resolve *hostname* to an IP address, or return ``None`` on failure."""
+    import ipaddress
+
+    try:
+        import socket
+    except ImportError:
+        return None
+
+    try:
+        addr = socket.getaddrinfo(
+            hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM
+        )
+        if addr:
+            return ipaddress.ip_address(addr[0][4][0])
+    except (socket.gaierror, ValueError, OSError):
+        return None
+    return None
+
+# ---------------------------------------------------------------------------
 # LLM settings
 # ---------------------------------------------------------------------------
 
@@ -52,6 +76,65 @@ class LLMSettings(BaseModel):
         default=2.0, ge=0.0,
         description="Base delay in seconds for exponential backoff between retries.",
     )
+    block_external_routing: bool = Field(
+        default=False,
+        description=(
+            "If True, the LLM endpoint must resolve to a private/loopback IP "
+            "(e.g. localhost, 127.0.0.1, 10.x.x.x, 192.168.x.x). "
+            "Useful for air-gapped deployments that should not send data "
+            "to cloud inference providers like OpenAI."
+        ),
+    )
+
+    @field_validator("block_external_routing", mode="after")
+    @classmethod
+    def _validate_endpoint_when_blocked(cls, blocked: bool, info: "ValidationInfo") -> bool:
+        """When ``block_external_routing`` is True, ensure the endpoint is private.
+
+        Resolves the hostname via DNS and checks whether the resulting IP
+        is private (RFC 1918, loopback, or link-local).  Falls back to a
+        fast string-prefix check when DNS resolution fails so that tests
+        and unusual hostnames aren't silently allowed through.
+        """
+        if not blocked:
+            return blocked
+
+        api_base = info.data.get("api_base") if info.data else None
+        if not api_base:
+            return blocked
+
+        from urllib.parse import urlparse
+
+        parsed = urlparse(api_base)
+        hostname = parsed.hostname or ""
+
+        # Fast path: well-known loopback literals need no DNS lookup.
+        if hostname in ("localhost", "127.0.0.1", "::1", "[::1]"):
+            return blocked
+
+        # Try full DNS resolution first.
+        ip = _resolve_ip(hostname)
+        if ip is not None:
+            if ip.is_private:
+                return blocked
+            # Public IP — fall through to error.
+
+        # Fallback: check for common private prefixes (covers cases where
+        # DNS resolution failed but the user wrote a private IP directly).
+        import ipaddress as _ipmod
+        try:
+            candidate = _ipmod.ip_address(hostname)
+            if candidate.is_private:
+                return blocked
+        except ValueError:
+            pass
+
+        # Explicit failure for the common case.
+        raise ValueError(
+            f"block_external_routing=True but endpoint '{api_base}' "
+            f"(hostname '{hostname}') resolves to a public IP. "
+            f"Use a local endpoint such as http://localhost:11434/v1."
+        )
 
 
 # ---------------------------------------------------------------------------

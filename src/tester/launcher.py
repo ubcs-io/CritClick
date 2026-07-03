@@ -104,8 +104,8 @@ class Launcher(ABC):
 
         self.process = subprocess.Popen(
             cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=env,
         )
         # Give the game time to initialise
@@ -213,6 +213,7 @@ class RenPyLauncher(Launcher):
         w, h = self.config.resolution or (1280, 720)
         cmd = [
             executable,
+            self.config.path,
             "--window",
             "--size", f"{w}x{h}",
             "--nodaemon",
