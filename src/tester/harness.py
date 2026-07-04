@@ -615,7 +615,11 @@ class Harness:
         screenshot_path: str | None = None
 
         if log_settings.save_screenshots:
-            filename = f"step_{self.step:04d}.png"
+            if self.run_id:
+                run_prefix = self.run_id[:5]
+                filename = f"{run_prefix}_step_{self.step:04d}.png"
+            else:
+                filename = f"step_{self.step:04d}.png"
             screenshot_path = os.path.join(log_settings.screenshot_dir, filename)
             try:
                 img = self.capturer.capture_pil()
