@@ -268,7 +268,7 @@ class Harness:
         try:
             image_b64 = self.capturer.capture_base64()
         except ScreenCaptureError as exc:
-            logger.error(f"💥 Screen capture failed: {exc}")
+            logger.error("Step %d/%d | 💥 Screen capture failed: %s", self.step, self.settings.harness.max_steps, exc)
             return "unknown"
 
         # 2. Build prompts
@@ -285,7 +285,7 @@ class Harness:
         try:
             raw = self.llm.analyze(image_b64, system_prompt, user_prompt)
         except RuntimeError as exc:
-            logger.error(f"💥 LLM call failed: {exc}")
+            logger.error("Step %d/%d | 💥 LLM call failed: %s", self.step, self.settings.harness.max_steps, exc)
             return "unknown"
         duration_ms = int((time.time() - llm_start) * 1000)
 
@@ -293,7 +293,7 @@ class Harness:
         try:
             response = ActionResponse.model_validate(raw)
         except Exception as exc:
-            logger.warning(f"⚠️  Invalid LLM response (schema): {exc}")
+            logger.warning("Step %d/%d | ⚠️  Invalid LLM response (schema): %s", self.step, self.settings.harness.max_steps, exc)
             return "unknown"
 
         # 5. Log narrative
@@ -325,7 +325,9 @@ class Harness:
 
         if self.stuck_counter >= self.settings.harness.stuck_threshold:
             logger.warning(
-                "⚠️  Possible stuck state — %d identical '%s' actions.",
+                "Step %d/%d | ⚠️  Possible stuck state — %d identical '%s' actions.",
+                self.step,
+                self.settings.harness.max_steps,
                 self.stuck_counter,
                 action,
             )
@@ -334,19 +336,19 @@ class Harness:
         self.action_counts[action] = self.action_counts.get(action, 0) + 1
 
         if action == "done":
-            logger.info("🏁 Game ended or returned to main menu.")
+            logger.info("Step %d/%d | 🏁 Game ended or returned to main menu.", self.step, self.settings.harness.max_steps)
             return "completed"
 
         if action == "wait":
             wait_time = self.settings.harness.wait_duration
-            logger.info(f"⏳ Waiting {wait_time}s for scene to stabilise…")
+            logger.info("Step %d/%d | ⏳ Waiting %ss for scene to stabilise…", self.step, self.settings.harness.max_steps, wait_time)
             if not self.dry_run:
                 time.sleep(wait_time)
             return "waited"
 
         if action == "click":
             if len(response.coordinates) < 2:
-                logger.warning("⚠️  'click' action without valid coordinates — skipping.")
+                logger.warning("Step %d/%d | ⚠️  'click' action without valid coordinates — skipping.", self.step, self.settings.harness.max_steps)
                 return "unknown"
 
             x, y = self.capturer.scale_coordinates(
@@ -356,40 +358,42 @@ class Harness:
             # Bounds validation
             if not self._validate_coordinates(x, y):
                 logger.warning(
-                    "⚠️  Click coordinates (%d, %d) are outside expected window bounds — skipping.",
+                    "Step %d/%d | ⚠️  Click coordinates (%d, %d) are outside expected window bounds — skipping.",
+                    self.step,
+                    self.settings.harness.max_steps,
                     x, y,
                 )
                 return "unknown"
 
             if not self.dry_run:
                 pyautogui.click(x, y)
-                logger.info(f"🖱️  Clicked ({x}, {y})")
+                logger.info("Step %d/%d | 🖱️  Clicked (%d, %d)", self.step, self.settings.harness.max_steps, x, y)
             else:
-                logger.info(f"🔍 [DRY RUN] Would click ({x}, {y})")
+                logger.info("Step %d/%d | 🔍 [DRY RUN] Would click (%d, %d)", self.step, self.settings.harness.max_steps, x, y)
             return "clicked"
 
         if action == "type":
             text = response.text_to_type or ""
             if not self.dry_run:
                 pyautogui.write(text, interval=0.05)
-                logger.info(f"⌨️  Typed: {text}")
+                logger.info("Step %d/%d | ⌨️  Typed: %s", self.step, self.settings.harness.max_steps, text)
             else:
-                logger.info(f"🔍 [DRY RUN] Would type: {text}")
+                logger.info("Step %d/%d | 🔍 [DRY RUN] Would type: %s", self.step, self.settings.harness.max_steps, text)
             return "typed"
 
         if action == "press":
             key = response.key_to_press or ""
             if not key:
-                logger.warning("⚠️  'press' action without key_to_press — skipping.")
+                logger.warning("Step %d/%d | ⚠️  'press' action without key_to_press — skipping.", self.step, self.settings.harness.max_steps)
                 return "unknown"
             if not self.dry_run:
                 pyautogui.press(key)
-                logger.info(f"⌨️  Pressed key: {key}")
+                logger.info("Step %d/%d | ⌨️  Pressed key: %s", self.step, self.settings.harness.max_steps, key)
             else:
-                logger.info(f"🔍 [DRY RUN] Would press key: {key}")
+                logger.info("Step %d/%d | 🔍 [DRY RUN] Would press key: %s", self.step, self.settings.harness.max_steps, key)
             return "pressed"
 
-        logger.warning(f"⚠️  Unknown action: {action}")
+        logger.warning("Step %d/%d | ⚠️  Unknown action: %s", self.step, self.settings.harness.max_steps, action)
         return "unknown"
 
     def _validate_coordinates(self, x: int, y: int) -> bool:
@@ -417,7 +421,7 @@ class Harness:
                 img = self.capturer.capture_pil()
                 img.save(screenshot_path)
             except Exception as exc:
-                logger.warning(f"⚠️  Failed to save screenshot: {exc}")
+                logger.warning("Step %d/%d | ⚠️  Failed to save screenshot: %s", self.step, self.settings.harness.max_steps, exc)
                 screenshot_path = None
 
         entry = LogEntry(
