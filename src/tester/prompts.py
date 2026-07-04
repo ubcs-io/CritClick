@@ -32,6 +32,12 @@ CRITICAL — TARGETING FOR "click" ACTIONS:
 - A click action with NEITHER "bounding_box" NOR "coordinates" is INVALID and will be REJECTED.
 - If the target element is not visible or you're unsure, use "wait" instead and explain why.
 
+COORDINATE GRID:
+- The screenshot has a coordinate grid overlaid: thin cyan gridlines with their
+  pixel values labeled along the top/bottom (x) and left/right (y) edges.
+- Read every x/y value directly off the nearest gridlines — locate the element
+  between two labeled lines and interpolate. Do NOT guess pixel values by eye.
+
 Guidelines:
 - If dialogue is still animating or fading in, use "wait" until the text stabilises.
 - For choice screens, carefully read each option and choose based on narrative context.
@@ -54,6 +60,7 @@ If choices appear, click the most logical one based on narrative context.
 REMINDER: If your action is "click", you MUST include either "bounding_box"
 [preferred] or "coordinates" for the target element. A click action without
 either will be rejected. Prefer "bounding_box" — it's more accurate.
+Read all coordinate values off the overlaid grid's labeled lines.
 If you cannot determine the target, use "wait" instead.
 
 Output ONLY valid JSON matching the expected schema."""

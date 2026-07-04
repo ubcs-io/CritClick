@@ -18,59 +18,40 @@ from .models import ActionResponse
 logger = logging.getLogger("tester.client")
 
 
-class HttpxUrlFilter(logging.Filter):
-    """Scrub raw URLs from ``httpx`` log records unless *debug_llm* is enabled.
+class HttpxUrlFormatter(logging.Formatter):
+    """Scrub raw URLs from log output unless *debug_llm* is enabled.
 
-    By default the ``httpx`` library logs the full request URL (e.g.
-    ``HTTP Request: POST https://api.openai.com/v1/chat/completions …``).
-    This filter replaces the URL with a generic endpoint path so only the
-    API operation is visible, keeping API keys that may be embedded in the
-    query string out of plain-text logs.
+    Operates on the fully-formatted log message so URLs are caught no matter
+    how they arrive — ``%s``-style formatting, f-strings, ``record.args``,
+    ``record.extra``, or any other mechanism the ``httpx`` / ``openai``
+    libraries may use.
 
-    When ``debug_llm=True`` the record is passed through unchanged.
+    When ``debug_llm=True`` the message is passed through unchanged.
     """
 
     _URL_PATTERN = re.compile(r"(https?://\S+)")
 
-    def __init__(self, debug_llm: bool = False):
-        super().__init__()
+    def __init__(self, fmt=None, datefmt=None, style="%", validate=True, *, debug_llm=False):
+        super().__init__(fmt, datefmt, style, validate)
         self.debug_llm = debug_llm
 
-    def filter(self, record: logging.LogRecord) -> bool:
+    def format(self, record: logging.LogRecord) -> str:
+        formatted = super().format(record)
         if self.debug_llm:
-            return True
-        match = self._URL_PATTERN.search(record.getMessage())
-        if match:
-            full_url = match.group(1)
-            # Extract the path portion so the endpoint type is still visible
+            return formatted
+
+        # Replace every URL in the final formatted string with just the path
+        def _redact(m: re.Match) -> str:
+            full_url = m.group(1)
             try:
                 from urllib.parse import urlparse
                 parsed = urlparse(full_url)
                 endpoint = parsed.path or "/"
             except Exception:
                 endpoint = "/"
-            redacted = f"...{endpoint}"
+            return f"...{endpoint}"
 
-            # Scrub from record.msg (handles f-string / direct format style)
-            if isinstance(record.msg, str):
-                record.msg = record.msg.replace(full_url, redacted)
-
-            # Scrub from record.args (handles %s-style format where the URL
-            # lives in positional arguments — this is how httpx logs).
-            if record.args:
-                if isinstance(record.args, tuple):
-                    record.args = tuple(
-                        a.replace(full_url, redacted) if isinstance(a, str) else a
-                        for a in record.args
-                    )
-                elif isinstance(record.args, dict):
-                    record.args = {
-                        k: v.replace(full_url, redacted) if isinstance(v, str) else v
-                        for k, v in record.args.items()
-                    }
-                elif isinstance(record.args, str):
-                    record.args = record.args.replace(full_url, redacted)
-        return True
+        return self._URL_PATTERN.sub(_redact, formatted)
 
 
 class LLMClient(ABC):

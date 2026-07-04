@@ -157,6 +157,15 @@ class HarnessSettings(BaseModel):
         default=1.0, ge=0.1, le=10.0,
         description="Multiplier for LLM-returned coordinates (handles DPI mismatches).",
     )
+    coordinate_grid: bool = Field(
+        default=True,
+        description="If True, overlay a labeled coordinate grid on screenshots "
+        "sent to the model so it can read click coordinates off reference lines.",
+    )
+    grid_spacing: int = Field(
+        default=100, ge=20, le=500,
+        description="Pixel spacing between gridlines when coordinate_grid is enabled.",
+    )
     headless: bool = Field(
         default=False,
         description="If True, attempt to run on a virtual display (Linux + Xvfb).",

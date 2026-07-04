@@ -604,6 +604,100 @@ class Capturer:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _load_overlay_fonts() -> tuple[ImageFont.ImageFont, ImageFont.ImageFont]:
+        """Return ``(font, font_small)`` for overlay drawing.
+
+        Tries a few common system fonts and falls back to PIL's built-in
+        bitmap font.  Shared by ``draw_debug_overlay`` and
+        ``draw_coordinate_grid`` so the font selection lives in one place.
+        """
+        for font_name in (
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "arial.ttf",
+            "Arial.ttf",
+        ):
+            try:
+                return (
+                    ImageFont.truetype(font_name, 18),
+                    ImageFont.truetype(font_name, 14),
+                )
+            except Exception:
+                continue
+        default = ImageFont.load_default()
+        return (default, default)
+
+    @staticmethod
+    def draw_coordinate_grid(
+        image: Image.Image,
+        *,
+        spacing: int = 100,
+    ) -> Image.Image:
+        """Overlay a labeled coordinate grid on a copy of *image*.
+
+        Thin, semi-transparent gridlines are drawn every ``spacing`` pixels.
+        Each line is labeled with its pixel value: x-values along the top and
+        bottom edges, y-values along the left and right edges, so every line
+        is anchored on both sides for mid-screen interpolation.
+
+        The grid gives non-grounding vision models (e.g. gpt-4o) explicit
+        visual reference lines to read click coordinates off of.  Because the
+        labels are drawn at true pixel positions and scale with the image, the
+        reference survives any internal downscaling the model performs.
+
+        The original *image* is **not** modified; a new RGBA image is returned.
+
+        Args:
+            image: The captured game-window screenshot (PIL Image).
+            spacing: Pixel distance between adjacent gridlines.
+
+        Returns:
+            A new ``PIL.Image.Image`` with the grid drawn on top.
+        """
+        base = image.convert("RGBA")
+        overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        _, font_small = Capturer._load_overlay_fonts()
+
+        w, h = base.size
+        spacing = max(int(spacing), 1)
+        line_color = (0, 200, 255, 90)
+        label_color = (0, 220, 255, 255)
+        label_bg = (0, 0, 0, 170)
+
+        def _label(x: int, y: int, text: str, anchor: str) -> None:
+            """Draw *text* with a dark backing rect. *anchor* controls alignment."""
+            bbox = draw.textbbox((0, 0), text, font=font_small)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
+            if "right" in anchor:
+                x -= tw
+            elif "center" in anchor:
+                x -= tw // 2
+            if "bottom" in anchor:
+                y -= th
+            # Clamp so labels stay fully inside the image
+            x = max(0, min(x, w - tw))
+            y = max(0, min(y, h - th))
+            draw.rectangle([x - 2, y - 1, x + tw + 2, y + th + 1], fill=label_bg)
+            draw.text((x, y), text, fill=label_color, font=font_small)
+
+        # Vertical lines + x labels (top and bottom)
+        for gx in range(0, w, spacing):
+            draw.line([(gx, 0), (gx, h)], fill=line_color, width=1)
+            _label(gx, 2, str(gx), "left-top")
+            _label(gx, h - 2, str(gx), "left-bottom")
+
+        # Horizontal lines + y labels (left and right)
+        for gy in range(0, h, spacing):
+            draw.line([(0, gy), (w, gy)], fill=line_color, width=1)
+            _label(2, gy, str(gy), "left-top")
+            _label(w - 2, gy, str(gy), "right-top")
+
+        return Image.alpha_composite(base, overlay)
+
+    @staticmethod
     def draw_debug_overlay(
         image: Image.Image,
         *,
@@ -638,24 +732,7 @@ class Capturer:
         draw = ImageDraw.Draw(overlay)
 
         # --- font selection ---
-        font = None
-        font_small = None
-        for font_name in (
-            "/System/Library/Fonts/Helvetica.ttc",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-            "arial.ttf",
-            "Arial.ttf",
-        ):
-            try:
-                font = ImageFont.truetype(font_name, 18)
-                font_small = ImageFont.truetype(font_name, 14)
-                break
-            except Exception:
-                continue
-        if font is None:
-            font = ImageFont.load_default()
-            font_small = font
+        font, font_small = Capturer._load_overlay_fonts()
 
         # --- bounding box ---
         if bounding_box is not None and len(bounding_box) == 4:

@@ -209,3 +209,33 @@ class TestCaptureBackends:
         with patch.object(c, "_capture_via_pyautogui", return_value=MagicMock()) as mock_pa:
             c.capture_pil()
             mock_pa.assert_called_once()
+
+
+class TestCoordinateGrid:
+    """Tests for the model-facing coordinate-grid overlay."""
+
+    def test_grid_preserves_size_and_does_not_mutate(self):
+        from PIL import Image
+
+        from tester.screen import Capturer
+
+        src = Image.new("RGB", (400, 300), (10, 20, 30))
+        before = src.tobytes()
+
+        out = Capturer.draw_coordinate_grid(src, spacing=100)
+
+        assert out.size == src.size
+        assert out is not src
+        # Original image is untouched
+        assert src.tobytes() == before
+
+    def test_grid_draws_lines(self):
+        from PIL import Image
+
+        from tester.screen import Capturer
+
+        src = Image.new("RGB", (400, 300), (10, 20, 30))
+        out = Capturer.draw_coordinate_grid(src, spacing=100).convert("RGB")
+
+        # Some pixels must differ from the flat background (lines + labels drawn)
+        assert out.tobytes() != src.convert("RGB").tobytes()

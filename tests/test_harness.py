@@ -392,3 +392,46 @@ class TestRunRecap:
             harness.step = 3
             result = harness._run_recap()
             assert result is None
+
+
+class TestCoordinateGridApplication:
+    """The coordinate grid should be applied to the model image per config."""
+
+    def _make_harness(self, sample_settings, grid_enabled):
+        from PIL import Image
+
+        sample_settings.harness.coordinate_grid = grid_enabled
+        launcher = MagicMock()
+        client = MagicMock(spec=LLMClient)
+        # Return a valid 'wait' action so analyze_and_act has no click side effects
+        client.analyze.return_value = {
+            "description": "menu",
+            "action": "wait",
+            "reasoning": "let scene settle",
+            "narrative": "waited",
+        }
+        harness = Harness(sample_settings, launcher, client, dry_run=True)
+        harness.capturer = MagicMock()
+        harness.capturer.scale = 1.0
+        harness.capturer.game_window = None
+        harness.capturer.capture_pil.return_value = Image.new("RGB", (200, 150), (0, 0, 0))
+        return harness
+
+    def test_grid_applied_when_enabled(self, sample_settings):
+        from unittest.mock import patch
+
+        harness = self._make_harness(sample_settings, grid_enabled=True)
+        with patch("tester.harness.Capturer.draw_coordinate_grid") as mock_grid:
+            from PIL import Image
+            mock_grid.return_value = Image.new("RGB", (200, 150), (1, 1, 1))
+            harness.analyze_and_act()
+        mock_grid.assert_called_once()
+        assert mock_grid.call_args.kwargs["spacing"] == sample_settings.harness.grid_spacing
+
+    def test_grid_skipped_when_disabled(self, sample_settings):
+        from unittest.mock import patch
+
+        harness = self._make_harness(sample_settings, grid_enabled=False)
+        with patch("tester.harness.Capturer.draw_coordinate_grid") as mock_grid:
+            harness.analyze_and_act()
+        mock_grid.assert_not_called()

@@ -28,7 +28,7 @@ import logging
 import sys
 import textwrap
 
-from .client import HttpxUrlFilter, OpenAIClient
+from .client import HttpxUrlFormatter, OpenAIClient
 from .config import Settings
 from .harness import Harness
 from .launcher import Launcher, create_launcher
@@ -159,6 +159,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Log screen capture details, coordinate transformations, accessibility checks, and click position tracking.",
     )
     parser.add_argument(
+        "--no-grid",
+        action="store_true",
+        help="Disable the coordinate-grid overlay drawn on screenshots sent to the model.",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -234,11 +239,16 @@ def setup_logging(settings: Settings, verbose: bool = False, debug_llm: bool = F
         handlers=[logging.StreamHandler(sys.stderr)],
     )
 
-    # Scrub raw URLs from httpx log messages unless --debug-llm is active.
-    # httpx logs "HTTP Request: POST https://api.openai.com/v1/chat/completions …"
-    # at INFO level; without --debug-llm we redact the full URL to just the path.
-    httpx_logger = logging.getLogger("httpx")
-    httpx_logger.addFilter(HttpxUrlFilter(debug_llm=debug_llm))
+    # Scrub raw URLs from all log output unless --debug-llm is active.
+    # A formatter works on every log line after all formatting is complete,
+    # so URLs are caught regardless of how httpx/openai emit them
+    # (%s-style, f-strings, record.extra, etc.).
+    url_formatter = HttpxUrlFormatter(
+        fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+        debug_llm=debug_llm,
+    )
+    for handler in logging.getLogger().handlers:
+        handler.setFormatter(url_formatter)
 
 
 # ---------------------------------------------------------------------------
@@ -590,6 +600,11 @@ def main(argv: list[str] | None = None) -> None:
     if args.mobile or args.tablet:
         w, h = settings.game.resolution
         logger.info("🖥️  Screen override applied: %dx%d", w, h)
+
+    # --no-grid overrides the config-level coordinate_grid setting
+    if args.no_grid:
+        settings.harness.coordinate_grid = False
+        logger.info("🧭 Coordinate-grid overlay disabled via --no-grid")
 
     logger.info("Configuration loaded | game=%s | endpoint=%s", settings.game.path, settings.llm.api_base)
 

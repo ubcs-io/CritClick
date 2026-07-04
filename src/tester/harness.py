@@ -310,9 +310,18 @@ class Harness:
         # 1. Capture
         try:
             pil_image = self.capturer.capture_pil()
+            # Overlay a labeled coordinate grid so the model can read click
+            # coordinates off reference lines. The grid is drawn at true pixel
+            # positions, so returned coordinates need no extra transform.
+            if self.settings.harness.coordinate_grid:
+                model_image = Capturer.draw_coordinate_grid(
+                    pil_image, spacing=self.settings.harness.grid_spacing,
+                )
+            else:
+                model_image = pil_image
             # Encode to base64 for the LLM
             buf = BytesIO()
-            pil_image.save(buf, format="PNG")
+            model_image.save(buf, format="PNG")
             import base64
             image_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         except ScreenCaptureError as exc:
@@ -368,9 +377,11 @@ class Harness:
         self.context_window.append(f"Step {self.step}: {response.narrative}")
         self._write_log_entry(response, image_b64, duration_ms)
 
-        # 7. Generate debug overlay image (when debug_screen is enabled)
+        # 7. Generate debug overlay image (when debug_screen is enabled).
+        # Draw onto the gridded image the model actually saw, so the debug
+        # PNG shows the same reference lines plus where the click landed.
         if self.debug_screen:
-            self._save_debug_overlay(pil_image, response)
+            self._save_debug_overlay(model_image, response)
 
         # 8. Execute
         return self._execute(response)
