@@ -71,6 +71,7 @@ class OpenAIClient(LLMClient):
         self.retry_delay = retry_delay
         self.debug_llm = debug_llm
         self._last_system_prompt: str | None = None
+        self._last_user_prompt_skeleton: str | None = None
 
         from openai import OpenAI
 
@@ -99,11 +100,19 @@ class OpenAIClient(LLMClient):
                     system_prompt,
                 )
                 self._last_system_prompt = system_prompt
-            logger.info(
-                "🔍 [DEBUG-LLM] --- User prompt (%d chars) ---\n%s",
-                len(user_prompt),
-                user_prompt,
-            )
+            skeleton = self._user_prompt_skeleton(user_prompt)
+            if skeleton == self._last_user_prompt_skeleton:
+                logger.info(
+                    "🔍 [DEBUG-LLM] --- [EXISTING USER PROMPT TEMPLATE] (%d chars) ---",
+                    len(user_prompt),
+                )
+            else:
+                logger.info(
+                    "🔍 [DEBUG-LLM] --- User prompt (%d chars) ---\n%s",
+                    len(user_prompt),
+                    user_prompt,
+                )
+                self._last_user_prompt_skeleton = skeleton
             logger.info(
                 "🔍 [DEBUG-LLM] --- Image base64 length: %d chars ---",
                 len(image_b64),
@@ -185,6 +194,24 @@ class OpenAIClient(LLMClient):
 
         # Should not reach here, but satisfy type checker
         raise RuntimeError(f"LLM analyze failed: {last_exc}")
+
+    @staticmethod
+    def _user_prompt_skeleton(user_prompt: str) -> str:
+        """Replace the variable context block with a placeholder for comparison.
+
+        The user prompt template has a ``{context}`` slot that gets filled with
+        per-step narrative context.  This helper strips that section so the
+        static wrapper is all that remains, allowing us to detect when the
+        template itself has changed vs. when only the context differs.
+        """
+        import re
+
+        return re.sub(
+            r"Recent narrative context:\n.*?\n\nIdentify interactive elements",
+            "Recent narrative context:\n[...]\n\nIdentify interactive elements",
+            user_prompt,
+            flags=re.DOTALL,
+        )
 
     def _sleep_backoff(self, attempt: int) -> None:
         """Sleep with exponential backoff: delay * 2^(attempt-1)."""
