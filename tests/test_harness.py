@@ -49,7 +49,12 @@ class TestActionExecution:
     def dry_run_harness(self, sample_settings):
         launcher = MagicMock()
         client = MagicMock(spec=LLMClient)
-        return Harness(sample_settings, launcher, client, dry_run=True)
+        harness = Harness(sample_settings, launcher, client, dry_run=True)
+        # Mock the capturer to avoid real screen interactions
+        harness.capturer = MagicMock()
+        harness.capturer.scale = 1.0
+        harness.capturer.scale_coordinates.side_effect = lambda x, y: (int(x), int(y))
+        return harness
 
     def test_done_action(self, dry_run_harness):
         resp = ActionResponse(
@@ -81,6 +86,28 @@ class TestActionExecution:
         )
         result = dry_run_harness._execute(resp)
         assert result == "clicked"
+        dry_run_harness.capturer.scale_coordinates.assert_called_once_with(100.0, 200.0)
+
+    def test_click_action_valid_not_dry_run_calls_click(self, sample_settings):
+        """When not in dry-run, capturer.click() should be called with scaled coords."""
+        launcher = MagicMock()
+        client = MagicMock(spec=LLMClient)
+        harness = Harness(sample_settings, launcher, client, dry_run=False)
+        harness.capturer = MagicMock()
+        harness.capturer.scale = 0.5
+        harness.capturer.scale_coordinates.return_value = (50, 100)
+
+        resp = ActionResponse(
+            description="Button",
+            action="click",
+            coordinates=[100.0, 200.0],
+            reasoning="Need to click",
+            narrative="Clicked",
+        )
+        result = harness._execute(resp)
+        assert result == "clicked"
+        harness.capturer.scale_coordinates.assert_called_once_with(100.0, 200.0)
+        harness.capturer.click.assert_called_once_with(50, 100)
 
     def test_click_no_coordinates(self, dry_run_harness):
         resp = ActionResponse(

@@ -366,8 +366,8 @@ class Harness:
                 return "unknown"
 
             if not self.dry_run:
-                pyautogui.click(x, y)
-                logger.info("Step %d/%d | 🖱️  Clicked (%d, %d)", self.step, self.settings.harness.max_steps, x, y)
+                self.capturer.click(x, y)
+                logger.info("Step %d/%d | 🖱️  Clicked (%d, %d) [scale=%.2f]", self.step, self.settings.harness.max_steps, x, y, self.capturer.scale)
             else:
                 logger.info("Step %d/%d | 🔍 [DRY RUN] Would click (%d, %d)", self.step, self.settings.harness.max_steps, x, y)
             return "clicked"

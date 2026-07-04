@@ -1,10 +1,24 @@
 """Pytest configuration and shared fixtures."""
 
+import sys
+from unittest.mock import patch
 
 import pytest
 
 from tester.config import HarnessSettings, LLMSettings, LoggingSettings, Settings
 from tester.models import GameConfig
+
+
+@pytest.fixture(autouse=True)
+def _suppress_accessibility_check():
+    """Suppress the macOS accessibility check during all Capturer inits.
+
+    Without this, every ``Capturer()`` calls ``_check_accessibility()`` which
+    tries to reach real Quartz/ApplicationServices APIs that may not be
+    available or permitted in CI/dev environments.
+    """
+    with patch.object(sys, "platform", "linux"):
+        yield
 
 
 @pytest.fixture
