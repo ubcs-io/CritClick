@@ -131,6 +131,12 @@ class Launcher(ABC):
             return False
         return self.process.poll() is None
 
+    def get_pid(self) -> int | None:
+        """Return the PID of the launched game process, or ``None`` if not running."""
+        if self.process is None:
+            return None
+        return self.process.pid
+
     # ------------------------------------------------------------------
     # Command building
     # ------------------------------------------------------------------

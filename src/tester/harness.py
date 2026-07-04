@@ -20,6 +20,7 @@ from .launcher import Launcher, capture_git_info
 from .models import ActionResponse, LogEntry
 from .prompts import make_system_prompt, make_user_prompt
 from .screen import Capturer, ScreenCaptureError
+from .window import WindowTracker
 
 logger = logging.getLogger("tester.harness")
 
@@ -83,6 +84,9 @@ class Harness:
         self.start_time: float | None = None
         self.completion_reason: str | None = None
         self.action_counts: dict[str, int] = {}
+        self._recovery_attempts = 0
+        self._recovery_strategies: list[str] = []
+        self._window_tracker: WindowTracker | None = None
 
         # Captured at run start, written into the manifest
         self._git_info: dict | None = None
@@ -163,6 +167,29 @@ class Harness:
 
             # Launch the game
             self.launcher.launch()
+
+            # Find and bind to the game window for cropped capture + offset clicks
+            pid = self.launcher.get_pid()
+            if pid is not None:
+                self._window_tracker = WindowTracker(
+                    pid=pid,
+                    timeout=self.settings.harness.window_find_timeout,
+                    debug=self.debug_harness,
+                )
+                win = self._window_tracker.find_window()
+                if win is not None:
+                    self.capturer.set_game_window(win, self._window_tracker)
+                    # Focus the game window once before the loop begins
+                    self._window_tracker.focus(win)
+                    time.sleep(0.3)
+                else:
+                    logger.info(
+                        "🪟 No game window found — using full-screen capture + absolute coords."
+                    )
+            else:
+                logger.info(
+                    "🪟 Could not determine game PID — using full-screen capture + absolute coords."
+                )
 
         exit_code = EXIT_SUCCESS
         try:
@@ -364,6 +391,12 @@ class Harness:
                 action,
             )
 
+            # Attempt automatic recovery if enabled
+            if self.settings.harness.stuck_recovery:
+                recovery_result = self._recover_from_stuck()
+                if recovery_result is not None:
+                    return recovery_result
+
         # Track action counts for summary
         self.action_counts[action] = self.action_counts.get(action, 0) + 1
 
@@ -480,6 +513,95 @@ class Harness:
         # Allow a small margin for window borders/title bars
         margin = 50
         return (-margin <= x <= w + margin) and (-margin <= y <= h + margin)
+
+    # ------------------------------------------------------------------
+    # Stuck-state recovery
+    # ------------------------------------------------------------------
+
+    def _recover_from_stuck(self) -> str | None:
+        """Attempt to break out of a detected stuck state.
+
+        Rotates through a set of recovery strategies. Each call tries the
+        next strategy so the harness doesn't spam the same recovery action.
+
+        Returns the action string if a recovery action was executed,
+        ``None`` if recovery is disabled or no strategies remain.
+        """
+        # Build the strategy list once
+        if not self._recovery_strategies:
+            self._recovery_strategies = [
+                "press:escape",
+                "press:space",
+                "click_center",
+                "wait:5.0",
+                "press:enter",
+            ]
+
+        strategy_idx = self._recovery_attempts % len(self._recovery_strategies)
+        strategy = self._recovery_strategies[strategy_idx]
+        self._recovery_attempts += 1
+
+        logger.info(
+            "🔄 Step %d/%d | Stuck recovery attempt #%d — strategy: '%s'",
+            self.step, self.settings.harness.max_steps,
+            self._recovery_attempts, strategy,
+        )
+
+        if self.debug_harness:
+            logger.info(
+                "🔍 [DEBUG-HARNESS] Step %d/%d | Recovery: strategy_idx=%d, recovery_attempts=%d",
+                self.step, self.settings.harness.max_steps,
+                strategy_idx, self._recovery_attempts,
+            )
+
+        if self.dry_run:
+            logger.info(
+                "Step %d/%d | 🔍 [DRY RUN] Would execute recovery: %s",
+                self.step, self.settings.harness.max_steps, strategy,
+            )
+            # In dry-run, pretend it worked and reset stuck state
+            self.stuck_counter = 0
+            self._recovery_attempts = 0
+            self._recovery_strategies = []
+            return "recovery"
+
+        if strategy.startswith("press:"):
+            key = strategy.split(":", 1)[1]
+            pyautogui.press(key)
+            logger.info(
+                "Step %d/%d | 🔄 Recovery: pressed '%s' key",
+                self.step, self.settings.harness.max_steps, key,
+            )
+            # Track as a recovery action
+            self.action_counts["recovery"] = self.action_counts.get("recovery", 0) + 1
+            # Reset stuck counter since we did a recovery action
+            self.stuck_counter = 0
+            return "recovery"
+
+        elif strategy == "click_center":
+            w, h = self.settings.game.resolution
+            cx, cy = w // 2, h // 2
+            self.capturer.click(cx, cy)
+            logger.info(
+                "Step %d/%d | 🔄 Recovery: clicked center (%d, %d)",
+                self.step, self.settings.harness.max_steps, cx, cy,
+            )
+            self.action_counts["recovery"] = self.action_counts.get("recovery", 0) + 1
+            self.stuck_counter = 0
+            return "recovery"
+
+        elif strategy.startswith("wait:"):
+            wait_secs = float(strategy.split(":", 1)[1])
+            logger.info(
+                "Step %d/%d | 🔄 Recovery: extended wait %.1fs",
+                self.step, self.settings.harness.max_steps, wait_secs,
+            )
+            time.sleep(wait_secs)
+            self.action_counts["recovery"] = self.action_counts.get("recovery", 0) + 1
+            self.stuck_counter = 0
+            return "recovery"
+
+        return None
 
     # ------------------------------------------------------------------
     # Logging

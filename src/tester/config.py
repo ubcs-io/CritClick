@@ -169,6 +169,14 @@ class HarnessSettings(BaseModel):
         default=True,
         description="If True, print a 3-second countdown before launching the game.",
     )
+    stuck_recovery: bool = Field(
+        default=True,
+        description="If True, attempt automatic recovery strategies when stuck state is detected.",
+    )
+    window_find_timeout: float = Field(
+        default=15.0, ge=0.0, le=120.0,
+        description="Maximum seconds to wait for the game window to appear after launch.",
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -97,22 +97,63 @@ tester --self-test --config my_game.toml
 tester --config my_game.toml
 ```
 
-The startup countdown gives you a few seconds to click the game window so
-it's focused before input begins. Mouse to any screen corner to abort
-(pyautogui failsafe).
+## 6. Window focus & coordinate handling
 
-## 6. Troubleshooting
+After launching the game, `tester` automatically:
+
+1. **Detects the game window** — it polls for a window belonging to the game
+   process PID (up to `[harness].window_find_timeout` seconds, default 15s).
+2. **Crops screenshots** to the game window only — the LLM sees just the
+   game, not your desktop/menubar/dock.
+3. **Offsets click coordinates** — the LLM returns coordinates relative to
+   the game window's top-left corner, and `tester` adds the window's screen
+   position before clicking.
+4. **Re-focuses the window** before every click — using AppleScript to bring
+   the game frontmost so input lands correctly.
+
+This means you no longer need to manually click the game window during the
+startup countdown — `tester` handles focus automatically.
+
+If no game window is found (e.g. on a headless Xvfb server), the harness
+falls back gracefully to full-screen capture and absolute screen coordinates.
+
+### Configuration options
+
+```toml
+[harness]
+window_find_timeout = 15.0    # max seconds to wait for the game window (0–120)
+stuck_recovery      = true     # auto-recover from stuck states (default: true)
+```
+
+## 7. Stuck-state recovery
+
+When the harness detects 3 or more identical actions in a row (a "stuck"
+state), it can automatically attempt recovery. Recovery strategies rotate
+through:
+
+1. Press **Escape** (common "back/menu" key)
+2. Press **Space** (common "advance" key)
+3. Click the **center** of the game window
+4. Extended **wait** (5 seconds)
+5. Press **Enter**
+
+This is controlled by `[harness].stuck_recovery` (default: `true`). Disable
+it if you prefer the harness to simply warn and continue.
+
+## 8. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | Screenshots are blank / black | Screen Recording not granted | Grant in Privacy & Security, relaunch terminal |
 | No clicks / typing happen | Accessibility not granted | Grant in Privacy & Security, relaunch terminal |
+| Clicks land on wrong window | Game window not focused | Ensure window_find_timeout is high enough; check logs for "Game window found" |
 | `Permission denied: renpy.sh` | Script not executable | `chmod +x renpy.sh` |
 | Game won't open / "damaged" | Gatekeeper quarantine | `xattr -dr com.apple.quarantine <path>` |
 | Coordinates seem off on Retina | DPI scaling | adjust `[harness].screen_scale` |
+| Harness stuck in click loop | LLM confused or game hung | Recovery auto-kicks in; if not, set `stuck_recovery = true` |
 | `tester` not found on PATH | venv not active | `source .venv/bin/activate` |
 
-## 7. Scheduling on macOS
+## 9. Scheduling on macOS
 
 For unattended/repeated runs, use **launchd** (macOS's native scheduler).
 A template and instructions live in

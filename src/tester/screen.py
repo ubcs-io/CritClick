@@ -3,6 +3,10 @@
 Uses ``mss`` (fast, cross-platform) as the primary capture method, with
 ``pyautogui`` as a cross-platform fallback. On Linux, ``mss`` uses X11/shm
 and works both on the local display and inside Xvfb virtual framebuffers.
+
+When a game-window position is provided (via ``set_game_window``),
+captures are cropped to the game window and click coordinates are offset
+automatically so the LLM can work in game-window-relative space.
 """
 
 from __future__ import annotations
@@ -11,8 +15,12 @@ import logging
 import subprocess
 import sys
 from io import BytesIO
+from typing import TYPE_CHECKING
 
 from PIL import Image
+
+if TYPE_CHECKING:
+    from .window import WindowInfo, WindowTracker
 
 logger = logging.getLogger("tester.screen")
 
@@ -32,6 +40,11 @@ class Capturer:
     On macOS, auto-detects Retina backing-scale and applies the correction
     automatically so that LLM-returned pixel coordinates land on the
     correct logical position.
+
+    When ``set_game_window()`` has been called, captures are cropped to
+    the game window and click coordinates are offset by the window's
+    screen position — the LLM receives only the game window and returns
+    coordinates relative to it.
     """
 
     def __init__(self, scale: float = 0.0, debug: bool = False) -> None:
@@ -57,9 +70,41 @@ class Capturer:
         # --- Coordinate scale -------------------------------------------------
         self._scale = self._resolve_scale()
 
+        # --- Game window tracking ---------------------------------------------
+        self._game_window: WindowInfo | None = None
+        self._window_tracker: WindowTracker | None = None
+
         # --- macOS accessibility check ----------------------------------------
         if sys.platform == "darwin":
             self._check_accessibility()
+
+    # ------------------------------------------------------------------
+    # Game window binding
+    # ------------------------------------------------------------------
+
+    def set_game_window(self, win: WindowInfo | None, tracker: WindowTracker | None = None) -> None:
+        """Bind to a game window for cropped capture and offset clicks.
+
+        Args:
+            win: The game window info (position + size), or ``None`` to
+                revert to full-screen capture.
+            tracker: Optional ``WindowTracker`` used to re-focus the
+                window before each click.
+        """
+        self._game_window = win
+        self._window_tracker = tracker
+        if win is not None:
+            logger.info(
+                "🪟 Capturer bound to game window: %dx%d at (%d, %d)",
+                win.width, win.height, win.x, win.y,
+            )
+        else:
+            logger.debug("🪟 Capturer unbound from game window — full-screen mode.")
+
+    @property
+    def game_window(self) -> WindowInfo | None:
+        """The currently bound game window, or ``None``."""
+        return self._game_window
 
     @property
     def scale(self) -> float:
@@ -154,7 +199,6 @@ class Capturer:
         import re
 
         last_resolution_line: int | None = None
-        ui_scale: float | None = None
 
         for lineno, line in enumerate(result.stdout.splitlines()):
             stripped = line.strip()
@@ -228,7 +272,24 @@ class Capturer:
     # ------------------------------------------------------------------
 
     def capture_pil(self) -> Image.Image:
-        """Capture the whole screen and return a PIL Image."""
+        """Capture the screen (cropped to game window if bound) and return a PIL Image."""
+        img = self._capture_full_screen()
+
+        win = self._game_window
+        if win is not None:
+            # Crop to the game window region
+            crop_box = (win.x, win.y, win.x + win.width, win.y + win.height)
+            if self.debug:
+                logger.info(
+                    "🔍 [DEBUG-SCREEN] Cropping capture to game window: %dx%d at (%d, %d)",
+                    win.width, win.height, win.x, win.y,
+                )
+            img = img.crop(crop_box)
+
+        return img
+
+    def _capture_full_screen(self) -> Image.Image:
+        """Capture the whole screen (internal, no cropping)."""
         if self._mss_available:
             try:
                 # Grab monitor 1 (primary)
@@ -272,13 +333,33 @@ class Capturer:
     def scale_coordinates(self, x: float, y: float) -> tuple[int, int]:
         """Scale LLM-returned coordinates by the effective scale factor.
 
-        The LLM returns coordinates in the screenshot's physical pixel
-        space.  On a Retina display the logical coordinate system is
+        The LLM returns coordinates in the screenshot's pixel space.
+        On a Retina display the logical coordinate system is
         different, so we multiply by the scale factor to map to what
         ``pyautogui`` expects.
+
+        When a game window is bound, the LLM coordinates are assumed to
+        be relative to the game window's top-left corner, and the window
+        offset is added to produce absolute screen coordinates.
         """
+        # First apply scale
         scaled_x = int(x * self._scale)
         scaled_y = int(y * self._scale)
+
+        # Then offset by game window position (if bound)
+        win = self._game_window
+        if win is not None:
+            abs_x = scaled_x + win.x
+            abs_y = scaled_y + win.y
+            if self.debug:
+                logger.info(
+                    "🔍 [DEBUG-SCREEN] scale_coordinates: raw=(%.1f, %.1f) × scale=%.4f → "
+                    "game-rel=(%d, %d) + window-offset=(%d, %d) → absolute=(%d, %d)",
+                    x, y, self._scale,
+                    scaled_x, scaled_y, win.x, win.y, abs_x, abs_y,
+                )
+            return (abs_x, abs_y)
+
         if self.debug:
             logger.info(
                 "🔍 [DEBUG-SCREEN] scale_coordinates: raw=(%.1f, %.1f) × scale=%.4f → scaled=(%d, %d)",
@@ -287,17 +368,36 @@ class Capturer:
         return (scaled_x, scaled_y)
 
     def click(self, x: int, y: int) -> None:
-        """Click at the given *already-scaled* logical coordinates.
+        """Click at the given *absolute* logical screen coordinates.
 
         This is the single entry-point for mouse clicks in the harness.
         It centralises coordinate handling and platform-specific quirks
         (e.g. macOS accessibility, multi-monitor offsets).
 
+        When a game window is bound, ``scale_coordinates()`` should have
+        already added the window offset, so the (x, y) passed here are
+        absolute screen coordinates.
+
+        Before clicking, the game window is re-focused if a
+        ``WindowTracker`` is available.
+
         Args:
-            x: Logical X coordinate (after ``scale_coordinates``).
-            y: Logical Y coordinate (after ``scale_coordinates``).
+            x: Absolute logical X coordinate (after ``scale_coordinates``).
+            y: Absolute logical Y coordinate (after ``scale_coordinates``).
         """
         import pyautogui
+
+        # Re-focus the game window before clicking
+        if self._window_tracker is not None and self._game_window is not None:
+            if self.debug:
+                logger.info(
+                    "🔍 [DEBUG-SCREEN] Re-focusing game window before click (%d, %d)",
+                    x, y,
+                )
+            self._window_tracker.focus(self._game_window)
+            # Small delay to let the window manager complete the focus
+            import time
+            time.sleep(0.15)
 
         # Re-check accessibility before each click when debugging
         if self.debug and sys.platform == "darwin":
