@@ -159,9 +159,15 @@ class WindowTracker:
 
             window_id = entry.get(Quartz.kCGWindowNumber)
             if self.debug:
+                window_name = entry.get(Quartz.kCGWindowName, "")
+                owner_name = entry.get(Quartz.kCGWindowOwnerName, "")
+                window_layer = entry.get(Quartz.kCGWindowLayer, -1)
+                window_alpha = entry.get(Quartz.kCGWindowAlpha, -1)
                 logger.info(
-                    "🔍 [DEBUG-WINDOW] macOS window: PID=%d | ID=%s | %dx%d+%d+%d",
-                    self._pid, window_id, w, h, x, y,
+                    "🔍 [DEBUG-WINDOW] macOS window: PID=%d | ID=%s | name='%s' | owner='%s' | "
+                    "layer=%d alpha=%.2f | bounds=%dx%d+%d+%d",
+                    self._pid, window_id, window_name, owner_name,
+                    window_layer, window_alpha, w, h, x, y,
                 )
             return WindowInfo(x=x, y=y, width=w, height=h, window_id=window_id)
 

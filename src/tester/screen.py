@@ -206,10 +206,29 @@ class Capturer:
             # so we get physical pixels, not logical points.
             phys_img = self._capture_full_screen()
             phys_w, phys_h = phys_img.size
+
+            # Diagnostic: compare mss monitor info vs pyautogui vs full-screen capture.
+            # This is critical for understanding coordinate misalignment root causes.
+            mss_monitor_info = "N/A"
+            if self._mss_available and self._mss is not None:
+                try:
+                    m1 = self._mss.monitors[1]
+                    mss_monitor_info = (
+                        f"mss.monitors[1]={{{m1['width']}x{m1['height']}+{m1['left']}+{m1['top']}}}"
+                    )
+                except Exception:
+                    pass
+
             if phys_w > 0 and phys_h > 0 and logical_w > 0 and logical_h > 0:
                 scale_w = logical_w / phys_w
                 scale_h = logical_h / phys_h
                 avg = (scale_w + scale_h) / 2.0
+                logger.info(
+                    "🧮 Resolution comparison: pyautogui.size()=%dx%d | "
+                    "capture(pixels)=%dx%d | %s → scale_w=%.4f scale_h=%.4f avg=%.4f",
+                    logical_w, logical_h, phys_w, phys_h, mss_monitor_info,
+                    scale_w, scale_h, avg,
+                )
                 if abs(avg - 1.0) > 0.05:
                     logger.info(
                         "🧮 Physical screenshot %dx%d → logical %dx%d → scale %.2f",
@@ -394,6 +413,74 @@ class Capturer:
     # Coordinate scaling & click
     # ------------------------------------------------------------------
 
+    def _diagnose_window_position(self, click_x: int, click_y: int) -> None:
+        """Re-query the game window position and compare against cached bounds.
+
+        Logs a warning if the window has moved since it was first detected,
+        which would explain click misalignment.  Called before each click
+        when debug is enabled on macOS.
+        """
+        if self._window_tracker is None:
+            return
+
+        import Quartz  # type: ignore[import-untyped]
+
+        window_list = Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID,
+        )
+        pid = self._window_tracker._pid
+        for entry in window_list:
+            if entry.get(Quartz.kCGWindowOwnerPID) != pid:
+                continue
+            if entry.get(Quartz.kCGWindowLayer, 99) != 0:
+                continue
+            bounds = entry.get(Quartz.kCGWindowBounds, {})
+            cur_x = int(bounds.get("X", 0))
+            cur_y = int(bounds.get("Y", 0))
+            cur_w = int(bounds.get("Width", 0))
+            cur_h = int(bounds.get("Height", 0))
+            if cur_w <= 0 or cur_h <= 0:
+                continue
+
+            cached = self._game_window
+            if cached is not None:
+                dx = cur_x - cached.x
+                dy = cur_y - cached.y
+                dw = cur_w - cached.width
+                dh = cur_h - cached.height
+                if dx != 0 or dy != 0 or dw != 0 or dh != 0:
+                    logger.warning(
+                        "🔍 [DEBUG-SCREEN] Window POSITION DRIFT detected! "
+                        "cached=+%d+%d %dx%d | current=+%d+%d %dx%d | "
+                        "delta=(%+d, %+d, %+d, %+d) | "
+                        "click-target=absolute(%d, %d)",
+                        cached.x, cached.y, cached.width, cached.height,
+                        cur_x, cur_y, cur_w, cur_h,
+                        dx, dy, dw, dh,
+                        click_x, click_y,
+                    )
+                    # Recompute where the click would land in the *current*
+                    # game-window-relative space for comparison
+                    if cached.x != 0:
+                        rel_x = click_x - cur_x
+                        rel_y = click_y - cur_y
+                        logger.warning(
+                            "🔍 [DEBUG-SCREEN] If window were still at cached position, "
+                            "click would be at window-relative=(%d,%d) but with current "
+                            "position it lands at window-relative=(%d,%d) [window=%dx%d]",
+                            click_x - cached.x, click_y - cached.y,
+                            rel_x, rel_y, cur_w, cur_h,
+                        )
+                else:
+                    logger.info(
+                        "🔍 [DEBUG-SCREEN] Window position stable: +%d+%d %dx%d — "
+                        "click-target=absolute(%d, %d) → window-relative=(%d, %d)",
+                        cur_x, cur_y, cur_w, cur_h,
+                        click_x, click_y,
+                        click_x - cur_x, click_y - cur_y,
+                    )
+            break
+
     def scale_coordinates(self, x: float, y: float) -> tuple[int, int]:
         """Scale LLM-returned coordinates to absolute logical screen coords.
 
@@ -483,6 +570,11 @@ class Capturer:
                     "🔍 [DEBUG-SCREEN] Accessibility check FAILED before click: %s — "
                     "click may silently fail!", exc,
                 )
+
+        # Re-check the window position in case it was moved since startup.
+        # This diagnostic helps confirm the cached offset is still correct.
+        if self.debug and self._window_tracker is not None and sys.platform == "darwin":
+            self._diagnose_window_position(x, y)
 
         # Log current position for debugging click misalignment
         pos_before = pyautogui.position()

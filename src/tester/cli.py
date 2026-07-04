@@ -28,7 +28,7 @@ import logging
 import sys
 import textwrap
 
-from .client import OpenAIClient
+from .client import HttpxUrlFilter, OpenAIClient
 from .config import Settings
 from .harness import Harness
 from .launcher import Launcher, create_launcher
@@ -225,7 +225,7 @@ def load_settings(args: argparse.Namespace) -> Settings:
     return Settings.from_env_only()
 
 
-def setup_logging(settings: Settings, verbose: bool = False) -> None:
+def setup_logging(settings: Settings, verbose: bool = False, debug_llm: bool = False) -> None:
     """Configure the root tester logger."""
     level = logging.DEBUG if verbose else getattr(logging, settings.logging.log_level.upper(), logging.INFO)
     logging.basicConfig(
@@ -233,6 +233,12 @@ def setup_logging(settings: Settings, verbose: bool = False) -> None:
         format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
         handlers=[logging.StreamHandler(sys.stderr)],
     )
+
+    # Scrub raw URLs from httpx log messages unless --debug-llm is active.
+    # httpx logs "HTTP Request: POST https://api.openai.com/v1/chat/completions …"
+    # at INFO level; without --debug-llm we redact the full URL to just the path.
+    httpx_logger = logging.getLogger("httpx")
+    httpx_logger.addFilter(HttpxUrlFilter(debug_llm=debug_llm))
 
 
 # ---------------------------------------------------------------------------
@@ -576,7 +582,7 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Error loading configuration: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    setup_logging(settings, verbose=args.verbose)
+    setup_logging(settings, verbose=args.verbose, debug_llm=args.debug_llm)
     logger = logging.getLogger("tester.cli")
 
     # Apply screen size overrides from CLI flags before anything reads resolution
