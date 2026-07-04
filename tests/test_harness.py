@@ -1,5 +1,9 @@
 """Tests for the Harness action execution and bounds validation."""
 
+import json
+import os
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -221,3 +225,161 @@ class TestRunSummary:
         assert harness.action_counts.get("click") == 2
         assert harness.action_counts.get("wait") == 1
         assert harness.action_counts.get("done") == 1
+
+
+# ---------------------------------------------------------------------------
+# Recap tests
+# ---------------------------------------------------------------------------
+
+
+class TestRunRecap:
+    """Tests for the _run_recap() post-run LLM feedback feature."""
+
+    @pytest.fixture
+    def recap_harness(self, sample_settings):
+        """Harness with a mocked LLM client and a temp JSONL log file."""
+        launcher = MagicMock()
+        client = MagicMock(spec=LLMClient)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sample_settings.logging.save_screenshots = False
+
+            harness = Harness(sample_settings, launcher, client, dry_run=True, run_id="test-run-12345")
+            harness.start_time = harness.start_time  # set by __init__
+
+            # _apply_run_namespace() rewrites log_file to runs/<run_id>/...
+            # so we must write the log there, not to our original temp path.
+            log_file = harness.settings.logging.log_file
+            os.makedirs(os.path.dirname(log_file), exist_ok=True)
+
+            # Write a minimal JSONL log so _run_recap() has data to read
+            entries = [
+                {
+                    "step": 1,
+                    "timestamp": "2025-01-01T00:00:00",
+                    "llm_response": {
+                        "description": "Main menu",
+                        "action": "click",
+                        "coordinates": [100, 200],
+                        "reasoning": "Start button visible",
+                        "narrative": "Clicked start button.",
+                    },
+                    "duration_ms": 500,
+                },
+                {
+                    "step": 2,
+                    "timestamp": "2025-01-01T00:00:01",
+                    "llm_response": {
+                        "description": "Dialogue",
+                        "action": "press",
+                        "key_to_press": "enter",
+                        "reasoning": "Advance dialogue",
+                        "narrative": "Advanced dialogue.",
+                    },
+                    "duration_ms": 400,
+                },
+                {
+                    "step": 3,
+                    "timestamp": "2025-01-01T00:00:02",
+                    "llm_response": {
+                        "description": "Credits",
+                        "action": "done",
+                        "reasoning": "Game finished",
+                        "narrative": "Game ended.",
+                    },
+                    "duration_ms": 300,
+                },
+            ]
+            with open(log_file, "w", encoding="utf-8") as fh:
+                for entry in entries:
+                    fh.write(json.dumps(entry) + "\n")
+
+            # Simulate a completed run
+            harness.step = 3
+            harness.completion_reason = "completed"
+            harness.action_counts = {"click": 1, "press": 1, "done": 1}
+
+            yield harness, tmpdir
+
+    def test_recap_returns_dict_on_success(self, recap_harness):
+        harness, _tmpdir = recap_harness
+        mock_client: MagicMock = harness.llm  # type: ignore[assignment]
+        mock_client.analyze.return_value = {
+            "key_complaint": "The game had no save button in the options menu."
+        }
+
+        result = harness._run_recap()
+        assert result is not None
+        assert result["key_complaint"] == "The game had no save button in the options menu."
+
+    def test_recap_calls_llm_with_recap_prompt(self, recap_harness):
+        harness, _tmpdir = recap_harness
+        mock_client: MagicMock = harness.llm  # type: ignore[assignment]
+        mock_client.analyze.return_value = {
+            "key_complaint": "Everything worked fine."
+        }
+
+        harness._run_recap()
+        mock_client.analyze.assert_called_once()
+        _, system_prompt, user_prompt = mock_client.analyze.call_args[0]
+        assert "complaint" in system_prompt.lower()
+        assert "roadblock" in system_prompt.lower()
+        assert "Step 1" in user_prompt
+        assert "Step 2" in user_prompt
+        assert "Step 3" in user_prompt
+        assert "completed" in user_prompt
+        assert "click=1" in user_prompt
+
+    def test_recap_returns_none_on_llm_error(self, recap_harness):
+        harness, _tmpdir = recap_harness
+        mock_client: MagicMock = harness.llm  # type: ignore[assignment]
+        mock_client.analyze.side_effect = RuntimeError("API down")
+
+        result = harness._run_recap()
+        assert result is None
+
+    def test_recap_returns_none_on_validation_error(self, recap_harness):
+        harness, _tmpdir = recap_harness
+        mock_client: MagicMock = harness.llm  # type: ignore[assignment]
+        mock_client.analyze.return_value = {"wrong_field": "bad"}
+
+        result = harness._run_recap()
+        assert result is None
+
+    def test_recap_skipped_when_no_steps(self, sample_settings):
+        launcher = MagicMock()
+        client = MagicMock(spec=LLMClient)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_file = os.path.join(tmpdir, "playthrough_log.jsonl")
+            sample_settings.logging.log_file = log_file
+
+            harness = Harness(sample_settings, launcher, client, dry_run=True)
+            harness.step = 0
+            result = harness._run_recap()
+            assert result is None
+
+    def test_recap_skipped_when_no_log_file(self, sample_settings):
+        launcher = MagicMock()
+        client = MagicMock(spec=LLMClient)
+
+        harness = Harness(sample_settings, launcher, client, dry_run=True)
+        harness.settings.logging.log_file = "/nonexistent/path/log.jsonl"
+        harness.step = 5
+        result = harness._run_recap()
+        assert result is None
+
+    def test_recap_skipped_when_empty_log_file(self, sample_settings):
+        launcher = MagicMock()
+        client = MagicMock(spec=LLMClient)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_file = os.path.join(tmpdir, "playthrough_log.jsonl")
+            sample_settings.logging.log_file = log_file
+            # Create empty file
+            Path(log_file).touch()
+
+            harness = Harness(sample_settings, launcher, client, dry_run=True)
+            harness.step = 3
+            result = harness._run_recap()
+            assert result is None

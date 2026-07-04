@@ -17,8 +17,13 @@ import pyautogui
 from .client import LLMClient
 from .config import Settings
 from .launcher import Launcher, capture_git_info
-from .models import ActionResponse, LogEntry
-from .prompts import make_system_prompt, make_user_prompt
+from .models import ActionResponse, LogEntry, RecapReport
+from .prompts import (
+    make_recap_system_prompt,
+    make_recap_user_prompt,
+    make_system_prompt,
+    make_user_prompt,
+)
 from .screen import Capturer, ScreenCaptureError
 from .window import WindowTracker
 
@@ -229,7 +234,8 @@ class Harness:
             self.stop()
             self._exit_code = exit_code
             self._log_summary()
-            self._write_manifest()
+            recap = self._run_recap()
+            self._write_manifest(recap=recap)
 
         return exit_code
 
@@ -669,12 +675,16 @@ class Harness:
     # Run manifest
     # ------------------------------------------------------------------
 
-    def _write_manifest(self) -> None:
+    def _write_manifest(self, recap: dict | None = None) -> None:
         """Write a ``run_manifest.json`` describing this run.
 
         Only written when ``run_id`` is set (namespaced mode). The manifest is
         the canonical entry point for the ingestion system: discover runs by
         globbing ``runs/*/run_manifest.json``.
+
+        Args:
+            recap: Optional recap report dict (e.g. ``{"key_complaint": "..."}``)
+                   to embed in the manifest.
         """
         if not self.run_id:
             return
@@ -709,6 +719,9 @@ class Harness:
             "tester_version": __version__,
         }
 
+        if recap:
+            manifest["recap"] = recap
+
         run_dir = self.runs_dir / self.run_id
         os.makedirs(run_dir, exist_ok=True)
         manifest_path = run_dir / "run_manifest.json"
@@ -720,3 +733,96 @@ class Harness:
             logger.info("📦 Wrote run manifest: %s", manifest_path)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(f"⚠️  Failed to write run manifest: {exc}")
+
+    # ------------------------------------------------------------------
+    # Run recap
+    # ------------------------------------------------------------------
+
+    def _run_recap(self) -> dict | None:
+        """Send all step logs to the LLM for a post-run recap.
+
+        Reads back the JSONL log file, formats a recap prompt, and calls the
+        LLM to extract the key complaint from the playthrough.
+
+        Returns:
+            A dict with a ``"key_complaint"`` field, or ``None`` if the recap
+            could not be generated (missing log file, LLM error, etc.).
+        """
+        log_file = self.settings.logging.log_file
+        if not os.path.isfile(log_file):
+            logger.warning("📋 Recap skipped — no log file found at %s", log_file)
+            return None
+
+        if self.step == 0:
+            logger.info("📋 Recap skipped — no steps were executed.")
+            return None
+
+        # Read all log entries
+        try:
+            with open(log_file, "r", encoding="utf-8") as fh:
+                raw_lines = fh.readlines()
+        except Exception as exc:
+            logger.warning("📋 Recap skipped — could not read log file: %s", exc)
+            return None
+
+        if not raw_lines:
+            logger.info("📋 Recap skipped — log file is empty.")
+            return None
+
+        # Parse and format step log for the recap prompt
+        step_lines: list[str] = []
+        for line in raw_lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            step_num = entry.get("step", "?")
+            llm_resp = entry.get("llm_response", {})
+            narrative = llm_resp.get("narrative", "")
+            action = llm_resp.get("action", "")
+            reasoning = llm_resp.get("reasoning", "")
+            duration = entry.get("duration_ms", 0)
+            step_lines.append(
+                f"Step {step_num} [{action}] ({duration}ms): {narrative}\n"
+                f"  Reasoning: {reasoning}"
+            )
+
+        step_log = "\n".join(step_lines)
+
+        # Build recap prompts
+        duration = time.time() - self.start_time if self.start_time else 0
+        actions_str = ", ".join(
+            f"{k}={v}" for k, v in sorted(self.action_counts.items())
+        ) or "none"
+        system_prompt = make_recap_system_prompt()
+        user_prompt = make_recap_user_prompt(
+            steps_completed=self.step,
+            completion_reason=self.completion_reason or "unknown",
+            duration=duration,
+            action_counts=actions_str,
+            step_log=step_log,
+        )
+
+        # Call LLM — recap is text-only, so send a minimal 1×1 PNG placeholder
+        # to satisfy the vision API contract while keeping focus on the text.
+        PLACEHOLDER_PNG = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+        )
+        try:
+            raw = self.llm.analyze(PLACEHOLDER_PNG, system_prompt, user_prompt)
+        except RuntimeError as exc:
+            logger.warning("📋 Recap LLM call failed: %s", exc)
+            return None
+
+        try:
+            recap = RecapReport.model_validate(raw)
+        except Exception as exc:
+            logger.warning("📋 Recap response validation failed: %s", exc)
+            return None
+
+        recap_dict = recap.model_dump()
+        logger.info("📋 Run recap | key_complaint: %s", recap_dict["key_complaint"])
+        return recap_dict

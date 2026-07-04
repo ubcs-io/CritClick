@@ -71,3 +71,52 @@ def make_user_prompt(
     """Return the user prompt, filling in the context window."""
     tpl = (template or DEFAULT_USER_PROMPT_TEMPLATE).strip()
     return tpl.format(context=context)
+
+
+# ---------------------------------------------------------------------------
+# Recap prompt — runs after playthrough to extract key complaint
+# ---------------------------------------------------------------------------
+
+RECAP_SYSTEM_PROMPT = """You are an AI game testing analyst. You will receive a complete step-by-step log of a game playthrough. Your task is to identify the single most important complaint, roadblock, or issue that occurred during the run.
+
+Guidelines:
+- Look for errors, stuck states, repeated failed actions, or unnatural delays.
+- If the run went smoothly, identify what stood out as notable (e.g. "dialogue flowed well", "no interactive elements were missed").
+- Your response must be a concise, single-sentence summary of the key complaint.
+- Output ONLY valid JSON matching the expected schema."""
+
+
+RECAP_USER_PROMPT_TEMPLATE = """Review the following playthrough log and identify the single most significant complaint, roadblock, or issue.
+
+Run summary:
+- Steps completed: {steps_completed}
+- Completion reason: {completion_reason}
+- Duration: {duration:.1f}s
+- Action counts: {action_counts}
+
+Step-by-step log:
+{step_log}
+
+What was the key complaint? Output ONLY valid JSON."""
+
+
+def make_recap_system_prompt(custom: str | None = None) -> str:
+    """Return the recap system prompt, preferring a user-supplied override."""
+    return (custom or RECAP_SYSTEM_PROMPT).strip()
+
+
+def make_recap_user_prompt(
+    steps_completed: int,
+    completion_reason: str,
+    duration: float,
+    action_counts: str,
+    step_log: str,
+) -> str:
+    """Return the recap user prompt filled with run metadata and step log."""
+    return RECAP_USER_PROMPT_TEMPLATE.format(
+        steps_completed=steps_completed,
+        completion_reason=completion_reason,
+        duration=duration,
+        action_counts=action_counts,
+        step_log=step_log,
+    )

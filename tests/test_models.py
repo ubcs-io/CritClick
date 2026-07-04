@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from tester.models import ActionResponse, ActionType, LogEntry
+from tester.models import ActionResponse, ActionType, LogEntry, RecapReport
 
 
 class TestActionType:
@@ -125,3 +125,18 @@ class TestLogEntry:
                 duration_ms=-1,
                 image_hex_truncated="abc123",
             )
+
+
+class TestRecapReport:
+    def test_valid_recap(self):
+        recap = RecapReport(key_complaint="The game got stuck on a dialogue screen and never progressed.")
+        assert recap.key_complaint == "The game got stuck on a dialogue screen and never progressed."
+
+    def test_model_dump(self):
+        recap = RecapReport(key_complaint="No issues detected.")
+        d = recap.model_dump()
+        assert d == {"key_complaint": "No issues detected."}
+
+    def test_missing_key_complaint(self):
+        with pytest.raises(ValidationError):
+            RecapReport()
