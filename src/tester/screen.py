@@ -19,8 +19,10 @@ from typing import TYPE_CHECKING
 
 from PIL import Image
 
+from .window import WindowInfo
+
 if TYPE_CHECKING:
-    from .window import WindowInfo, WindowTracker
+    from .window import WindowTracker
 
 logger = logging.getLogger("tester.screen")
 
