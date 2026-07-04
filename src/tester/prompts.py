@@ -32,11 +32,24 @@ CRITICAL — TARGETING FOR "click" ACTIONS:
 - A click action with NEITHER "bounding_box" NOR "coordinates" is INVALID and will be REJECTED.
 - If the target element is not visible or you're unsure, use "wait" instead and explain why.
 
-COORDINATE GRID:
-- The screenshot has a coordinate grid overlaid: thin cyan gridlines with their
-  pixel values labeled along the top/bottom (x) and left/right (y) edges.
-- Read every x/y value directly off the nearest gridlines — locate the element
-  between two labeled lines and interpolate. Do NOT guess pixel values by eye.
+COORDINATE GRID — READ COORDINATES OFF THE GRID, DO NOT ESTIMATE BY EYE:
+- The screenshot has a cyan coordinate grid overlaid. Vertical lines are labeled
+  with their x pixel value along the top/bottom edges; horizontal lines with
+  their y pixel value along the left/right edges. Lines are spaced evenly.
+- Your eyeballed sense of pixel position is unreliable and will miss the target.
+  You MUST anchor every coordinate to the printed grid labels instead.
+- For each "click", follow this procedure and show it in the "reasoning" field:
+  1. Find the target element on screen.
+  2. Trace to the nearest LABELED gridlines and read their numbers:
+     "left edge is just right of the x=700 line; right edge near x=900;
+      top edge at the y=400 line; bottom just below y=440".
+  3. Derive the numbers from those labels — interpolate between lines when the
+     edge falls partway. Do NOT output a value you did not read off a label.
+  4. Sanity-check: the element is at roughly x=(left+right)/2. If your numbers
+     put it far from where the element actually sits on the grid, you misread —
+     re-trace before answering.
+- A "reasoning" that does not cite specific gridline numbers means you guessed;
+  redo it against the labels.
 
 Guidelines:
 - If dialogue is still animating or fading in, use "wait" until the text stabilises.
@@ -60,7 +73,9 @@ If choices appear, click the most logical one based on narrative context.
 REMINDER: If your action is "click", you MUST include either "bounding_box"
 [preferred] or "coordinates" for the target element. A click action without
 either will be rejected. Prefer "bounding_box" — it's more accurate.
-Read all coordinate values off the overlaid grid's labeled lines.
+Do NOT estimate pixel positions by eye. In "reasoning", name the specific
+labeled gridlines the target sits between (e.g. "between x=700 and x=900,
+y=400 and y=440") and derive the coordinates from those numbers.
 If you cannot determine the target, use "wait" instead.
 
 Output ONLY valid JSON matching the expected schema."""
