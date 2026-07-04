@@ -211,9 +211,10 @@ class RenPyLauncher(Launcher):
 
     def build_command(self, executable: str) -> list[str]:
         cmd = [executable, self.config.path]
-        if self.config.resolution:
-            w, h = self.config.resolution
-            cmd += ["--size", f"{w}x{h}"]
+        # Ren'Py does not support a --size CLI flag; resolution is controlled
+        # inside the game itself (options.rpy / gui.rpy). The GameConfig
+        # resolution field is used by Godot and for coordinate validation but
+        # has no effect on the Ren'Py command line.
         cmd += self.config.args
         return cmd
 

@@ -25,7 +25,9 @@ class TestRenpyLauncher:
         cmd = launcher.build_command("/fake/game/renpy.sh")
         assert cmd[0] == "/fake/game/renpy.sh"
         assert "/fake/game" in cmd
-        assert "--size" in cmd
+        # Ren'Py does not support --size; resolution is game-internal.
+        assert "--size" not in cmd
+        assert "1280x720" not in cmd
 
 class TestGodotLauncher:
     def test_build_command_with_project_dir(self, tmp_path):
