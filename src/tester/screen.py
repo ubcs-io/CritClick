@@ -75,17 +75,12 @@ class Capturer:
         # --- Coordinate scale -------------------------------------------------
         self._scale = self._resolve_scale()
 
-        # --- Game-window → game-resolution scaling ----------------------------
-        # When the captured window is larger (or smaller) than the game's
-        # configured resolution, we need an additional scale factor so that
-        # LLM-returned coordinates (relative to the cropped window image)
-        # map correctly into the game's logical coordinate space.
-        self._game_resolution = game_resolution
-        self._window_scale: float = 1.0
-
         # --- Game window tracking ---------------------------------------------
         self._game_window: WindowInfo | None = None
         self._window_tracker: WindowTracker | None = None
+        # Physical-pixel window position (accounting for Retina scale).
+        # Populated by set_game_window() — used for cropping and offset.
+        self._game_window_physical: WindowInfo | None = None
 
         # --- macOS accessibility check ----------------------------------------
         if sys.platform == "darwin":
@@ -99,8 +94,11 @@ class Capturer:
         """Bind to a game window for cropped capture and offset clicks.
 
         Args:
-            win: The game window info (position + size), or ``None`` to
-                revert to full-screen capture.
+            win: The game window info (position + size) in **logical** points
+                (as returned by Quartz/pygetwindow).  On Retina/HiDPI displays
+                these are NOT physical pixels.  This method scales the bounds
+                to physical pixels for correct cropping of mss captures.
+
             tracker: Optional ``WindowTracker`` used to re-focus the
                 window before each click.
         """
@@ -108,26 +106,36 @@ class Capturer:
         self._window_tracker = tracker
         if win is not None:
             logger.info(
-                "🪟 Capturer bound to game window: %dx%d at (%d, %d)",
+                "🪟 Capturer bound to game window (logical): %dx%d at (%d, %d)",
                 win.width, win.height, win.x, win.y,
             )
-            # Compute the window→game resolution scale factor.
-            # The LLM sees a screenshot sized to the cropped window
-            # dimensions, but coordinates should map to the game's
-            # configured logical resolution.
-            if self._game_resolution is not None and win.width > 0 and win.height > 0:
-                gw, gh = self._game_resolution
-                self._window_scale = (
-                    (gw / win.width) + (gh / win.height)
-                ) / 2.0
-                logger.info(
-                    "🪟 Window→game scale: window=%dx%d → game=%dx%d → multiplier=%.4f",
-                    win.width, win.height, gw, gh, self._window_scale,
-                )
-            else:
-                self._window_scale = 1.0
+
+            # On Retina/HiDPI displays, the window bounds from Quartz are in
+            # **logical points** while mss captures in **physical pixels**.
+            # Multiply by the Retina scale to get physical-pixel coordinates
+            # so that the crop and offset work correctly.
+            #
+            # The scale stored in self._scale is the logical→physical
+            # multiplier (e.g. 0.5 on a 2× display means logical pixels are
+            # half the size).  The physical→logical factor is 1/self._scale.
+            retina = 1.0 / self._scale if self._scale > 0 else 1.0
+            phys_x = int(win.x * retina)
+            phys_y = int(win.y * retina)
+            phys_w = int(win.width * retina)
+            phys_h = int(win.height * retina)
+
+            self._game_window_physical = WindowInfo(
+                x=phys_x, y=phys_y, width=phys_w, height=phys_h,
+                window_id=win.window_id,
+            )
+
+            logger.info(
+                "🪟 Capturer bound (physical pixels): %dx%d at (%d, %d) "
+                "[retina=%.1fx]",
+                phys_w, phys_h, phys_x, phys_y, retina,
+            )
         else:
-            self._window_scale = 1.0
+            self._game_window_physical = None
             logger.debug("🪟 Capturer unbound from game window — full-screen mode.")
 
     @property
@@ -137,13 +145,18 @@ class Capturer:
 
     @property
     def scale(self) -> float:
-        """Composite coordinate scale factor (read-only).
+        """Coordinate scale factor (read-only).
 
-        This is the product of the HiDPI/Retina scale and the
-        window→game resolution scale.  Use this for debug logging
-        to see the total multiplier applied to LLM coordinates.
+        On Retina/HiDPI displays, captured screenshots are in physical
+        pixels while pyautogui operates in logical points.  This scale
+        maps LLM coordinates (in the physical-pixel image space) to
+        logical points that pyautogui can use.
+
+        When a game window is bound and the crop has been correctly
+        scaled to physical pixels, the LLM sees the game at its native
+        rendered resolution — no additional window→game scale needed.
         """
-        return self._scale * self._window_scale
+        return self._scale
 
     # ------------------------------------------------------------------
     # Scale detection
@@ -314,15 +327,25 @@ class Capturer:
         """Capture the screen (cropped to game window if bound) and return a PIL Image."""
         img = self._capture_full_screen()
 
-        win = self._game_window
-        if win is not None:
-            # Crop to the game window region
-            crop_box = (win.x, win.y, win.x + win.width, win.y + win.height)
+        pw = self._game_window_physical
+        if pw is not None:
+            # Crop using physical-pixel bounds so the crop rectangle
+            # maps correctly onto the physical-pixel capture.
+            crop_box = (pw.x, pw.y, pw.x + pw.width, pw.y + pw.height)
             if self.debug:
                 logger.info(
-                    "🔍 [DEBUG-SCREEN] Cropping capture to game window: %dx%d at (%d, %d)",
-                    win.width, win.height, win.x, win.y,
+                    "🔍 [DEBUG-SCREEN] Cropping capture to game window "
+                    "(physical px): %dx%d at (%d, %d) | image size: %dx%d",
+                    pw.width, pw.height, pw.x, pw.y,
+                    img.width, img.height,
                 )
+                if self._game_window is not None:
+                    w = self._game_window
+                    logger.info(
+                        "🔍 [DEBUG-SCREEN] Logical window: %dx%d at (%d, %d) — "
+                        "scale=%.4f",
+                        w.width, w.height, w.x, w.y, self._scale,
+                    )
             img = img.crop(crop_box)
 
         return img
@@ -370,28 +393,29 @@ class Capturer:
     # ------------------------------------------------------------------
 
     def scale_coordinates(self, x: float, y: float) -> tuple[int, int]:
-        """Scale LLM-returned coordinates by the effective scale factor.
+        """Scale LLM-returned coordinates to absolute logical screen coords.
 
-        The LLM returns coordinates in the screenshot's pixel space
-        (the cropped window image).  Two adjustments are applied:
+        The LLM returns coordinates in the *physical-pixel* space of the
+        screenshot it received (the cropped window image).  Two adjustments
+        are applied:
 
-        1. **HiDPI / Retina scale** (``_scale``) — corrects for
-           physical-vs-logical pixel mismatch on Retina displays.
-        2. **Window→game scale** (``_window_scale``) — corrects for
-           the difference between the cropped window dimensions and
-           the game's configured logical resolution.
+        1. **HiDPI / Retina scale** (``_scale``) — maps physical-pixel
+           coordinates to logical points that pyautogui operates in.
+        2. **Window offset** — adds the game window's screen position
+           (in logical points) to produce absolute screen coordinates.
 
-        When a game window is bound, the adjusted coordinates are
-        relative to the game window's top-left corner, and the window
-        screen offset is added to produce absolute screen coordinates
-        that ``pyautogui`` can use.
+        Because the crop in ``capture_pil()`` now uses physical-pixel
+        bounds, the cropped image the LLM sees directly represents the
+        game's output at native resolution.  No separate window→game
+        resolution scale is needed — the LLM coordinates are already
+        in the game's pixel space.
         """
-        # Apply composite scale (HiDPI × window→game)
-        composite = self._scale * self._window_scale
-        scaled_x = int(x * composite)
-        scaled_y = int(y * composite)
+        # Map physical-pixel coords → logical points
+        scaled_x = int(x * self._scale)
+        scaled_y = int(y * self._scale)
 
-        # Then offset by game window position (if bound)
+        # Offset by game window position (logical points, since pyautogui
+        # operates in logical space)
         win = self._game_window
         if win is not None:
             abs_x = scaled_x + win.x
@@ -399,9 +423,9 @@ class Capturer:
             if self.debug:
                 logger.info(
                     "🔍 [DEBUG-SCREEN] scale_coordinates: raw=(%.1f, %.1f) × "
-                    "composite=%.4f (hidpi=%.4f × window=%.4f) → "
-                    "game-rel=(%d, %d) + window-offset=(%d, %d) → absolute=(%d, %d)",
-                    x, y, composite, self._scale, self._window_scale,
+                    "scale=%.4f → logical=(%d, %d) + window-offset(logical)=(%d, %d) "
+                    "→ absolute=(%d, %d)",
+                    x, y, self._scale,
                     scaled_x, scaled_y, win.x, win.y, abs_x, abs_y,
                 )
             return (abs_x, abs_y)
@@ -409,8 +433,8 @@ class Capturer:
         if self.debug:
             logger.info(
                 "🔍 [DEBUG-SCREEN] scale_coordinates: raw=(%.1f, %.1f) × "
-                "composite=%.4f (hidpi=%.4f × window=%.4f) → scaled=(%d, %d)",
-                x, y, composite, self._scale, self._window_scale, scaled_x, scaled_y,
+                "scale=%.4f → logical=(%d, %d) [full-screen, no offset]",
+                x, y, self._scale, scaled_x, scaled_y,
             )
         return (scaled_x, scaled_y)
 
@@ -435,7 +459,7 @@ class Capturer:
         import pyautogui
 
         # Re-focus the game window before clicking
-        if self._window_tracker is not None and self._game_window is not None:
+        if self._window_tracker is not None and self._game_window_physical is not None:
             if self.debug:
                 logger.info(
                     "🔍 [DEBUG-SCREEN] Re-focusing game window before click (%d, %d)",

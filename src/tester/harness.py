@@ -432,38 +432,47 @@ class Harness:
             return "waited"
 
         if action == "click":
-            if self.debug_harness:
-                logger.info(
-                    "🔍 [DEBUG-HARNESS] Step %d/%d | Action 'click' | raw_coords=%s | capturer.scale=%.4f",
-                    self.step, self.settings.harness.max_steps,
-                    response.coordinates, self.capturer.scale,
-                )
-
-            if len(response.coordinates) < 2:
-                logger.warning("Step %d/%d | ⚠️  'click' action without valid coordinates — skipping.", self.step, self.settings.harness.max_steps)
+            # Resolve click target: prefer bounding_box centre, fall back to coordinates
+            bb = response.bounding_box
+            if bb is not None and len(bb) == 4:
+                # Centre of bounding box: [x1, y1, x2, y2]
+                raw_x = (bb[0] + bb[2]) / 2.0
+                raw_y = (bb[1] + bb[3]) / 2.0
+                target_source = f"b-box centre from [{bb[0]:.0f},{bb[1]:.0f},{bb[2]:.0f},{bb[3]:.0f}]"
+            elif len(response.coordinates) >= 2:
+                raw_x = response.coordinates[0]
+                raw_y = response.coordinates[1]
+                target_source = "raw coordinates"
+            else:
+                logger.warning("Step %d/%d | ⚠️  'click' action without valid coordinates or bounding_box — skipping.", self.step, self.settings.harness.max_steps)
                 return "unknown"
 
-            x, y = self.capturer.scale_coordinates(
-                response.coordinates[0], response.coordinates[1]
-            )
+            if self.debug_harness:
+                logger.info(
+                    "🔍 [DEBUG-HARNESS] Step %d/%d | Action 'click' | target=%s | raw=(%.1f, %.1f) | capturer.scale=%.4f",
+                    self.step, self.settings.harness.max_steps,
+                    target_source, raw_x, raw_y, self.capturer.scale,
+                )
+
+            x, y = self.capturer.scale_coordinates(raw_x, raw_y)
 
             if self.debug_harness:
-                res_w, res_h = self.settings.game.resolution
+                screen_w, screen_h = pyautogui.size()
                 logger.info(
-                    "🔍 [DEBUG-HARNESS] Step %d/%d | Scaled coords: (%d, %d) | resolution: %dx%d | margin=50",
-                    self.step, self.settings.harness.max_steps, x, y, res_w, res_h,
+                    "🔍 [DEBUG-HARNESS] Step %d/%d | Scaled coords: (%d, %d) | screen: %dx%d",
+                    self.step, self.settings.harness.max_steps, x, y, screen_w, screen_h,
                 )
 
             # Bounds validation
             if not self._validate_coordinates(x, y):
+                screen_w, screen_h = pyautogui.size()
                 if self.debug_harness:
-                    res_w, res_h = self.settings.game.resolution
                     logger.warning(
-                        "🔍 [DEBUG-HARNESS] Step %d/%d | BOUNDS CHECK FAILED: (%d, %d) outside expected %dx%d (±50 margin)",
-                        self.step, self.settings.harness.max_steps, x, y, res_w, res_h,
+                        "🔍 [DEBUG-HARNESS] Step %d/%d | BOUNDS CHECK FAILED: (%d, %d) outside screen %dx%d (±50 margin)",
+                        self.step, self.settings.harness.max_steps, x, y, screen_w, screen_h,
                     )
                 logger.warning(
-                    "Step %d/%d | ⚠️  Click coordinates (%d, %d) are outside expected window bounds — skipping.",
+                    "Step %d/%d | ⚠️  Click coordinates (%d, %d) are outside expected screen bounds — skipping.",
                     self.step,
                     self.settings.harness.max_steps,
                     x, y,
@@ -472,19 +481,19 @@ class Harness:
 
             if self.debug_harness:
                 logger.info(
-                    "🔍 [DEBUG-HARNESS] Step %d/%d | Bounds check passed — proceeding with click",
-                    self.step, self.settings.harness.max_steps,
+                    "🔍 [DEBUG-HARNESS] Step %d/%d | Bounds check passed — proceeding with click (%s)",
+                    self.step, self.settings.harness.max_steps, target_source,
                 )
 
             if not self.dry_run:
                 self.capturer.click(x, y)
-                logger.info("Step %d/%d | 🖱️  Clicked (%d, %d) [scale=%.2f]", self.step, self.settings.harness.max_steps, x, y, self.capturer.scale)
+                logger.info("Step %d/%d | 🖱️  Clicked (%d, %d) [scale=%.2f, %s]", self.step, self.settings.harness.max_steps, x, y, self.capturer.scale, target_source)
             else:
-                logger.info("Step %d/%d | 🔍 [DRY RUN] Would click (%d, %d)", self.step, self.settings.harness.max_steps, x, y)
+                logger.info("Step %d/%d | 🔍 [DRY RUN] Would click (%d, %d) [%s]", self.step, self.settings.harness.max_steps, x, y, target_source)
             # Feed the actual click coordinates back to the LLM context
             # so it can self-correct if clicks are landing in the wrong place.
             self.context_window.append(
-                f"Click executed at absolute screen coordinates ({x}, {y})."
+                f"Click executed at absolute screen coordinates ({x}, {y}) [{target_source}]."
             )
             return "clicked"
 
@@ -523,11 +532,20 @@ class Harness:
         return "unknown"
 
     def _validate_coordinates(self, x: int, y: int) -> bool:
-        """Check whether coordinates fall within the expected game window bounds."""
-        w, h = self.settings.game.resolution
-        # Allow a small margin for window borders/title bars
+        """Check whether coordinates fall within the expected screen region.
+
+        When a game window is bound, ``x`` and ``y`` are absolute logical
+        screen coordinates (window-relative + window offset).  Validation
+        checks against the logical screen size rather than the game
+        resolution, because the coordinates are already transformed to the
+        screen coordinate space by ``scale_coordinates()``.
+        """
+        import pyautogui
+
+        screen_w, screen_h = pyautogui.size()
+        # Allow a small margin for edge clicks
         margin = 50
-        return (-margin <= x <= w + margin) and (-margin <= y <= h + margin)
+        return (-margin <= x <= screen_w + margin) and (-margin <= y <= screen_h + margin)
 
     # ------------------------------------------------------------------
     # Stuck-state recovery

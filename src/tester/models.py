@@ -32,8 +32,16 @@ class ActionResponse(BaseModel):
     )
     coordinates: list[float] = Field(
         default_factory=list,
-        description="(x, y) pixel coordinates relative to top-left of the game window. "
-        "Required for 'click' actions. May be empty for 'wait'/'done'.",
+        description="(x, y) pixel coordinates relative to top-left of the game window "
+        "for 'click' actions. Use bounding_box instead for more precise targeting. "
+        "May be empty for 'wait'/'done'.",
+    )
+    bounding_box: list[float] | None = Field(
+        None,
+        description="[x1, y1, x2, y2] bounding box of the target element in pixels "
+        "relative to top-left of the game window. When provided for 'click' actions, "
+        "the click will be centered on this box. Prefer this over raw coordinates "
+        "for better targeting precision.",
     )
     text_to_type: str | None = Field(
         None,

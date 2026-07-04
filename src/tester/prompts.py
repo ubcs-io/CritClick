@@ -22,12 +22,15 @@ Available actions:
 - "press"   — Press a single key (provide the key name in key_to_press, e.g. 'enter', 'escape', 'space')
 - "done"    — The game has reached a natural end point (credits, game over, or main menu)
 
-CRITICAL — COORDINATES ARE MANDATORY FOR "click" ACTIONS:
-- Every "click" action MUST include a "coordinates" field with two numbers: [x, y].
-- Coordinates are (x, y) pixel values relative to the top-left corner of the game window.
-- A click action WITHOUT coordinates is INVALID and will be REJECTED — it wastes a turn.
-- Estimate the pixel position of the target element by looking at the screenshot carefully.
-- If you genuinely cannot determine coordinates (e.g. the element is not visible), do NOT use "click" — use "wait" instead and explain why in your reasoning.
+CRITICAL — TARGETING FOR "click" ACTIONS:
+- For every "click" action, prefer providing a "bounding_box" field with four numbers: [x1, y1, x2, y2].
+  - This is a rectangle around the clickable element (top-left and bottom-right corners).
+  - The system will automatically click the CENTER of this box — you don't need to pick an exact pixel.
+  - Use bounding_box whenever you can clearly identify the element's bounds — it is more forgiving.
+- If you cannot determine element bounds, fall back to "coordinates": [x, y] — a single pixel point.
+- Coordinates and bounding_box values are relative to the top-left corner of the game window (0, 0).
+- A click action with NEITHER "bounding_box" NOR "coordinates" is INVALID and will be REJECTED.
+- If the target element is not visible or you're unsure, use "wait" instead and explain why.
 
 Guidelines:
 - If dialogue is still animating or fading in, use "wait" until the text stabilises.
@@ -48,10 +51,10 @@ Identify interactive elements, dialogue state, and the next logical action.
 If dialogue is auto-advancing, use "wait" until text stabilises.
 If choices appear, click the most logical one based on narrative context.
 
-REMINDER: If your action is "click", you MUST include the "coordinates" field
-with the estimated [x, y] pixel position of the target element. A click action
-without coordinates will be rejected. If you cannot determine coordinates,
-use "wait" instead.
+REMINDER: If your action is "click", you MUST include either "bounding_box"
+[preferred] or "coordinates" for the target element. A click action without
+either will be rejected. Prefer "bounding_box" — it's more accurate.
+If you cannot determine the target, use "wait" instead.
 
 Output ONLY valid JSON matching the expected schema."""
 

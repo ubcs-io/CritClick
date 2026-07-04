@@ -18,34 +18,43 @@ class TestCoordinateValidation:
         launcher = MagicMock()
         client = MagicMock(spec=LLMClient)
         harness = Harness(sample_settings, launcher, client, dry_run=True)
-        # resolution is (1280, 720)
+        # Validate against the real screen size — coordinates inside screen bounds.
+        # (100, 200) is trivially inside any real screen.
         assert harness._validate_coordinates(100, 200) is True
-        assert harness._validate_coordinates(1280, 720) is True
         assert harness._validate_coordinates(0, 0) is True
 
     def test_negative_within_margin(self, sample_settings):
         launcher = MagicMock()
         client = MagicMock(spec=LLMClient)
         harness = Harness(sample_settings, launcher, client, dry_run=True)
-        # margin is 50
+        # margin is 50 — slightly negative coords are OK
         assert harness._validate_coordinates(-50, -50) is True
 
     def test_far_outside_bounds(self, sample_settings):
         launcher = MagicMock()
         client = MagicMock(spec=LLMClient)
         harness = Harness(sample_settings, launcher, client, dry_run=True)
+        # -100 is more than 50 margin below 0
         assert harness._validate_coordinates(-100, 100) is False
         assert harness._validate_coordinates(100, -100) is False
-        assert harness._validate_coordinates(5000, 100) is False
-        assert harness._validate_coordinates(100, 5000) is False
+        # 50000 is far beyond any real screen
+        assert harness._validate_coordinates(50000, 100) is False
+        assert harness._validate_coordinates(100, 50000) is False
 
     def test_beyond_margin(self, sample_settings):
+        """Validate against a mocked screen size for deterministic behaviour."""
+        from unittest.mock import patch
+
         launcher = MagicMock()
         client = MagicMock(spec=LLMClient)
         harness = Harness(sample_settings, launcher, client, dry_run=True)
-        # resolution (1280, 720), margin 50
-        assert harness._validate_coordinates(1331, 100) is False  # 1280+50=1330
-        assert harness._validate_coordinates(100, 771) is False   # 720+50=770
+        # Mock pyautogui.size() to return 1280×720 so the test is deterministic.
+        with patch("tester.harness.pyautogui.size", return_value=(1280, 720)):
+            # margin 50: valid range is -50 ≤ x ≤ 1330, -50 ≤ y ≤ 770
+            assert harness._validate_coordinates(1280, 720) is True  # edge
+            assert harness._validate_coordinates(1330, 770) is True  # exact margin edge
+            assert harness._validate_coordinates(1331, 100) is False  # beyond margin
+            assert harness._validate_coordinates(100, 771) is False   # beyond margin
 
 
 class TestActionExecution:
