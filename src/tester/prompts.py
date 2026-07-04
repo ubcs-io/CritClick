@@ -22,8 +22,14 @@ Available actions:
 - "press"   — Press a single key (provide the key name in key_to_press, e.g. 'enter', 'escape', 'space')
 - "done"    — The game has reached a natural end point (credits, game over, or main menu)
 
-Guidelines:
+CRITICAL — COORDINATES ARE MANDATORY FOR "click" ACTIONS:
+- Every "click" action MUST include a "coordinates" field with two numbers: [x, y].
 - Coordinates are (x, y) pixel values relative to the top-left corner of the game window.
+- A click action WITHOUT coordinates is INVALID and will be REJECTED — it wastes a turn.
+- Estimate the pixel position of the target element by looking at the screenshot carefully.
+- If you genuinely cannot determine coordinates (e.g. the element is not visible), do NOT use "click" — use "wait" instead and explain why in your reasoning.
+
+Guidelines:
 - If dialogue is still animating or fading in, use "wait" until the text stabilises.
 - For choice screens, carefully read each option and choose based on narrative context.
 - When in doubt about what to click, look for interactive elements like highlighted text, buttons, or UI icons.
@@ -41,6 +47,11 @@ Recent narrative context:
 Identify interactive elements, dialogue state, and the next logical action.
 If dialogue is auto-advancing, use "wait" until text stabilises.
 If choices appear, click the most logical one based on narrative context.
+
+REMINDER: If your action is "click", you MUST include the "coordinates" field
+with the estimated [x, y] pixel position of the target element. A click action
+without coordinates will be rejected. If you cannot determine coordinates,
+use "wait" instead.
 
 Output ONLY valid JSON matching the expected schema."""
 
