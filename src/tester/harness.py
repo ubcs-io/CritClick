@@ -369,7 +369,7 @@ class Harness:
         self._write_log_entry(response, image_b64, duration_ms)
 
         # 7. Generate debug overlay image (when debug_screen is enabled)
-        if self.debug_screen and self.run_id:
+        if self.debug_screen:
             self._save_debug_overlay(pil_image, response)
 
         # 8. Execute
@@ -734,10 +734,14 @@ class Harness:
                 metadata=metadata,
             )
 
-            # Save
-            run_dir = self.runs_dir / self.run_id  # type: ignore[arg-type]
-            os.makedirs(run_dir, exist_ok=True)
-            out_path = run_dir / f"debug_step_{self.step:04d}.png"
+            # Save — prefer the namespaced run directory when available,
+            # otherwise fall back to a sibling directory of the screenshots.
+            if self.run_id:
+                out_dir = self.runs_dir / self.run_id  # type: ignore[arg-type]
+            else:
+                out_dir = Path(self.settings.logging.screenshot_dir).parent / "debug_overlays"
+            os.makedirs(out_dir, exist_ok=True)
+            out_path = out_dir / f"debug_step_{self.step:04d}.png"
             annotated.save(str(out_path), format="PNG")
             logger.info("📸 Debug overlay saved → %s", out_path)
 
