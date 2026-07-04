@@ -33,6 +33,49 @@ from .config import Settings
 from .harness import Harness
 from .launcher import Launcher, create_launcher
 
+# ---------------------------------------------------------------------------
+# Screen size presets for --mobile / --tablet flags
+# ---------------------------------------------------------------------------
+
+SCREEN_PRESETS: dict[str, tuple[int, int]] = {
+    "mobile": (390, 844),   # iPhone 14 Pro (portrait)
+    "tablet": (1024, 768),  # iPad (portrait)
+}
+
+
+
+def apply_screen_preset(args: argparse.Namespace, game_config: "GameConfig") -> None:
+    """Apply mobile/tablet screen size overrides to ``game_config.resolution``.
+
+    Raises ``SystemExit`` via ``parser.error()`` if conflicting options are used,
+    so the caller must pass the argument parser instance.
+    """
+    # Validate mutual exclusivity (mobile vs tablet) and landscape dependency.
+    # We can't use the parser's error() here easily, so we just print to stderr
+    # and exit. The parser argument is accepted for future compatibility.
+    if args.mobile and args.tablet:
+        print(
+            "Error: --mobile and --tablet are mutually exclusive. Use one or neither.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not args.mobile and not args.tablet:
+        if args.landscape:
+            print(
+                "Warning: --landscape has no effect without --mobile or --tablet. Ignoring.",
+                file=sys.stderr,
+            )
+        return
+
+    preset_key = "mobile" if args.mobile else "tablet"
+    w, h = SCREEN_PRESETS[preset_key]
+
+    if args.landscape:
+        w, h = h, w  # swap width/height for landscape orientation
+
+    game_config.resolution = (w, h)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -135,6 +178,30 @@ def build_parser() -> argparse.ArgumentParser:
             "Path to a lock file. If the file is already held by another run, "
             "this invocation exits with code 4 (EXIT_LOCKED) instead of starting. "
             "Recommended for scheduled deployments on a shared display."
+        ),
+    )
+    parser.add_argument(
+        "--mobile",
+        action="store_true",
+        help=(
+            "Override game resolution to mobile portrait (390×844, iPhone 14 Pro). "
+            "Use --landscape to swap to 844×390. Mutually exclusive with --tablet."
+        ),
+    )
+    parser.add_argument(
+        "--tablet",
+        action="store_true",
+        help=(
+            "Override game resolution to tablet portrait (1024×768, iPad). "
+            "Use --landscape to swap to 768×1024. Mutually exclusive with --mobile."
+        ),
+    )
+    parser.add_argument(
+        "--landscape",
+        action="store_true",
+        help=(
+            "Swap the --mobile or --tablet preset to landscape orientation "
+            "(width ↔ height). Has no effect without --mobile or --tablet."
         ),
     )
 
@@ -501,6 +568,13 @@ def main(argv: list[str] | None = None) -> None:
 
     setup_logging(settings, verbose=args.verbose)
     logger = logging.getLogger("tester.cli")
+
+    # Apply screen size overrides from CLI flags before anything reads resolution
+    apply_screen_preset(args, settings.game)
+    if args.mobile or args.tablet:
+        w, h = settings.game.resolution
+        logger.info("🖥️  Screen override applied: %dx%d", w, h)
+
     logger.info("Configuration loaded | game=%s | endpoint=%s", settings.game.path, settings.llm.api_base)
 
     # --check: validate and exit

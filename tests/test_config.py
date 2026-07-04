@@ -1,5 +1,6 @@
 """Tests for configuration loading and validation."""
 
+import argparse
 from pathlib import Path
 
 import pytest
@@ -172,3 +173,83 @@ class TestConfigDump:
         d = settings.config_dump()
         assert d["llm"]["api_key"] == "***redacted***"
         assert "secret-key-12345" not in str(d)
+
+
+# ---------------------------------------------------------------------------
+# Screen size override tests (apply_screen_preset from cli.py)
+# ---------------------------------------------------------------------------
+
+
+class TestApplyScreenPreset:
+    """Tests for the ``apply_screen_preset`` helper that mutates ``GameConfig.resolution``."""
+
+    @staticmethod
+    def _make_args(mobile=False, tablet=False, landscape=False):
+        """Build an argparse.Namespace with the screen preset flags."""
+        return argparse.Namespace(mobile=mobile, tablet=tablet, landscape=landscape)
+
+    @staticmethod
+    def _make_game_config():
+        return GameConfig(type="renpy", path="/fake/game")
+
+    def test_mobile_portrait(self):
+        from tester.cli import apply_screen_preset
+
+        args = self._make_args(mobile=True)
+        gc = self._make_game_config()
+        apply_screen_preset(args, gc)
+        assert gc.resolution == (390, 844)
+
+    def test_mobile_landscape(self):
+        from tester.cli import apply_screen_preset
+
+        args = self._make_args(mobile=True, landscape=True)
+        gc = self._make_game_config()
+        apply_screen_preset(args, gc)
+        assert gc.resolution == (844, 390)
+
+    def test_tablet_portrait(self):
+        from tester.cli import apply_screen_preset
+
+        args = self._make_args(tablet=True)
+        gc = self._make_game_config()
+        apply_screen_preset(args, gc)
+        assert gc.resolution == (1024, 768)
+
+    def test_tablet_landscape(self):
+        from tester.cli import apply_screen_preset
+
+        args = self._make_args(tablet=True, landscape=True)
+        gc = self._make_game_config()
+        apply_screen_preset(args, gc)
+        assert gc.resolution == (768, 1024)
+
+    def test_mobile_and_tablet_mutually_exclusive(self, capsys):
+        from tester.cli import apply_screen_preset
+
+        args = self._make_args(mobile=True, tablet=True)
+        gc = self._make_game_config()
+        with pytest.raises(SystemExit):
+            apply_screen_preset(args, gc)
+        captured = capsys.readouterr()
+        assert "mutually exclusive" in captured.err
+
+    def test_landscape_without_preset_is_noop(self, capsys):
+        from tester.cli import apply_screen_preset
+
+        args = self._make_args(landscape=True)
+        gc = self._make_game_config()
+        original = gc.resolution
+        apply_screen_preset(args, gc)
+        assert gc.resolution == original
+        captured = capsys.readouterr()
+        assert "no effect" in captured.err
+
+    def test_no_flags_leaves_resolution_unchanged(self):
+        from tester.cli import apply_screen_preset
+
+        args = self._make_args()
+        gc = self._make_game_config()
+        original = gc.resolution
+        apply_screen_preset(args, gc)
+        assert gc.resolution == original

@@ -28,7 +28,12 @@ type = "renpy"
 path = "./my_game"
 # Optional: override auto-detected executable name
 # executable = "renpy.sh"
-# Game window resolution [width, height]
+# Game window resolution [width, height].
+# Can be overridden at runtime with --mobile, --tablet, and --landscape flags:
+#   --mobile           → 390×844 portrait (iPhone 14 Pro)
+#   --mobile --landscape → 844×390 landscape
+#   --tablet           → 1024×768 portrait (iPad)
+#   --tablet --landscape → 768×1024 landscape
 resolution = [1280, 720]
 # Run "git pull --rebase" before launching (requires git repo)
 git_pull = false
