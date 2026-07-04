@@ -47,7 +47,12 @@ class Capturer:
     coordinates relative to it.
     """
 
-    def __init__(self, scale: float = 0.0, debug: bool = False) -> None:
+    def __init__(
+        self,
+        scale: float = 0.0,
+        debug: bool = False,
+        game_resolution: tuple[int, int] | None = None,
+    ) -> None:
         # ``scale`` acts as a manual override.  When zero (default), the
         # capturer will auto-detect the display scale factor where possible.
         self._manual_scale = scale if scale > 0 else None
@@ -69,6 +74,14 @@ class Capturer:
 
         # --- Coordinate scale -------------------------------------------------
         self._scale = self._resolve_scale()
+
+        # --- Game-window → game-resolution scaling ----------------------------
+        # When the captured window is larger (or smaller) than the game's
+        # configured resolution, we need an additional scale factor so that
+        # LLM-returned coordinates (relative to the cropped window image)
+        # map correctly into the game's logical coordinate space.
+        self._game_resolution = game_resolution
+        self._window_scale: float = 1.0
 
         # --- Game window tracking ---------------------------------------------
         self._game_window: WindowInfo | None = None
@@ -98,7 +111,23 @@ class Capturer:
                 "🪟 Capturer bound to game window: %dx%d at (%d, %d)",
                 win.width, win.height, win.x, win.y,
             )
+            # Compute the window→game resolution scale factor.
+            # The LLM sees a screenshot sized to the cropped window
+            # dimensions, but coordinates should map to the game's
+            # configured logical resolution.
+            if self._game_resolution is not None and win.width > 0 and win.height > 0:
+                gw, gh = self._game_resolution
+                self._window_scale = (
+                    (gw / win.width) + (gh / win.height)
+                ) / 2.0
+                logger.info(
+                    "🪟 Window→game scale: window=%dx%d → game=%dx%d → multiplier=%.4f",
+                    win.width, win.height, gw, gh, self._window_scale,
+                )
+            else:
+                self._window_scale = 1.0
         else:
+            self._window_scale = 1.0
             logger.debug("🪟 Capturer unbound from game window — full-screen mode.")
 
     @property
@@ -108,8 +137,13 @@ class Capturer:
 
     @property
     def scale(self) -> float:
-        """Effective coordinate scale factor (read-only)."""
-        return self._scale
+        """Composite coordinate scale factor (read-only).
+
+        This is the product of the HiDPI/Retina scale and the
+        window→game resolution scale.  Use this for debug logging
+        to see the total multiplier applied to LLM coordinates.
+        """
+        return self._scale * self._window_scale
 
     # ------------------------------------------------------------------
     # Scale detection
@@ -338,18 +372,24 @@ class Capturer:
     def scale_coordinates(self, x: float, y: float) -> tuple[int, int]:
         """Scale LLM-returned coordinates by the effective scale factor.
 
-        The LLM returns coordinates in the screenshot's pixel space.
-        On a Retina display the logical coordinate system is
-        different, so we multiply by the scale factor to map to what
-        ``pyautogui`` expects.
+        The LLM returns coordinates in the screenshot's pixel space
+        (the cropped window image).  Two adjustments are applied:
 
-        When a game window is bound, the LLM coordinates are assumed to
-        be relative to the game window's top-left corner, and the window
-        offset is added to produce absolute screen coordinates.
+        1. **HiDPI / Retina scale** (``_scale``) — corrects for
+           physical-vs-logical pixel mismatch on Retina displays.
+        2. **Window→game scale** (``_window_scale``) — corrects for
+           the difference between the cropped window dimensions and
+           the game's configured logical resolution.
+
+        When a game window is bound, the adjusted coordinates are
+        relative to the game window's top-left corner, and the window
+        screen offset is added to produce absolute screen coordinates
+        that ``pyautogui`` can use.
         """
-        # First apply scale
-        scaled_x = int(x * self._scale)
-        scaled_y = int(y * self._scale)
+        # Apply composite scale (HiDPI × window→game)
+        composite = self._scale * self._window_scale
+        scaled_x = int(x * composite)
+        scaled_y = int(y * composite)
 
         # Then offset by game window position (if bound)
         win = self._game_window
@@ -358,17 +398,19 @@ class Capturer:
             abs_y = scaled_y + win.y
             if self.debug:
                 logger.info(
-                    "🔍 [DEBUG-SCREEN] scale_coordinates: raw=(%.1f, %.1f) × scale=%.4f → "
+                    "🔍 [DEBUG-SCREEN] scale_coordinates: raw=(%.1f, %.1f) × "
+                    "composite=%.4f (hidpi=%.4f × window=%.4f) → "
                     "game-rel=(%d, %d) + window-offset=(%d, %d) → absolute=(%d, %d)",
-                    x, y, self._scale,
+                    x, y, composite, self._scale, self._window_scale,
                     scaled_x, scaled_y, win.x, win.y, abs_x, abs_y,
                 )
             return (abs_x, abs_y)
 
         if self.debug:
             logger.info(
-                "🔍 [DEBUG-SCREEN] scale_coordinates: raw=(%.1f, %.1f) × scale=%.4f → scaled=(%d, %d)",
-                x, y, self._scale, scaled_x, scaled_y,
+                "🔍 [DEBUG-SCREEN] scale_coordinates: raw=(%.1f, %.1f) × "
+                "composite=%.4f (hidpi=%.4f × window=%.4f) → scaled=(%d, %d)",
+                x, y, composite, self._scale, self._window_scale, scaled_x, scaled_y,
             )
         return (scaled_x, scaled_y)
 

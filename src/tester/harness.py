@@ -68,7 +68,11 @@ class Harness:
         self.dry_run = dry_run
         self.debug_harness = debug_harness
         self.debug_screen = debug_screen
-        self.capturer = Capturer(scale=settings.harness.screen_scale, debug=debug_screen)
+        self.capturer = Capturer(
+            scale=settings.harness.screen_scale,
+            debug=debug_screen,
+            game_resolution=tuple(settings.game.resolution),
+        )
 
         # Run namespacing — when run_id is set, outputs go under
         # ``<runs_dir>/<run_id>/`` instead of the flat cwd paths.
@@ -471,6 +475,11 @@ class Harness:
                 logger.info("Step %d/%d | 🖱️  Clicked (%d, %d) [scale=%.2f]", self.step, self.settings.harness.max_steps, x, y, self.capturer.scale)
             else:
                 logger.info("Step %d/%d | 🔍 [DRY RUN] Would click (%d, %d)", self.step, self.settings.harness.max_steps, x, y)
+            # Feed the actual click coordinates back to the LLM context
+            # so it can self-correct if clicks are landing in the wrong place.
+            self.context_window.append(
+                f"Click executed at absolute screen coordinates ({x}, {y})."
+            )
             return "clicked"
 
         if action == "type":
