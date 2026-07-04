@@ -101,6 +101,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the package version and exit.",
     )
     parser.add_argument(
+        "--debug-llm",
+        action="store_true",
+        help="Log full LLM prompts and raw responses for debugging.",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -513,6 +518,7 @@ def main(argv: list[str] | None = None) -> None:
         temperature=settings.llm.temperature,
         max_retries=settings.llm.max_retries,
         retry_delay=settings.llm.retry_delay,
+        debug_llm=args.debug_llm,
     )
 
     # Instantiate launcher (skip in dry-run)

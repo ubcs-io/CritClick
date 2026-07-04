@@ -59,6 +59,7 @@ class OpenAIClient(LLMClient):
         temperature: float = 0.1,
         max_retries: int = 3,
         retry_delay: float = 2.0,
+        debug_llm: bool = False,
     ):
         if api_key is None:
             logger.info("No API key provided — connecting without authentication.")
@@ -68,6 +69,7 @@ class OpenAIClient(LLMClient):
         self.temperature = temperature
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.debug_llm = debug_llm
 
         from openai import OpenAI
 
@@ -82,6 +84,22 @@ class OpenAIClient(LLMClient):
 
         # Build the JSON schema from the Pydantic model so the LLM returns valid data
         response_format = self._build_response_format()
+
+        if self.debug_llm:
+            logger.info(
+                "🔍 [DEBUG-LLM] --- System prompt (%d chars) ---\n%s",
+                len(system_prompt),
+                system_prompt,
+            )
+            logger.info(
+                "🔍 [DEBUG-LLM] --- User prompt (%d chars) ---\n%s",
+                len(user_prompt),
+                user_prompt,
+            )
+            logger.info(
+                "🔍 [DEBUG-LLM] --- Image base64 length: %d chars ---",
+                len(image_b64),
+            )
 
         last_exc: Exception | None = None
         for attempt in range(1, self.max_retries + 2):  # +1 for initial attempt
@@ -122,6 +140,14 @@ class OpenAIClient(LLMClient):
                 raise RuntimeError(f"LLM API call failed after {attempt} attempts: {exc}") from exc
 
             raw = response.choices[0].message.content
+
+            if self.debug_llm:
+                logger.info(
+                    "🔍 [DEBUG-LLM] --- Raw model response (%d chars) ---\n%s",
+                    len(raw) if raw else 0,
+                    raw if raw else "(empty)",
+                )
+
             if not raw:
                 last_exc = RuntimeError("LLM returned empty content.")
                 logger.warning(
