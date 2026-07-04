@@ -70,6 +70,7 @@ class OpenAIClient(LLMClient):
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.debug_llm = debug_llm
+        self._last_system_prompt: str | None = None
 
         from openai import OpenAI
 
@@ -86,11 +87,18 @@ class OpenAIClient(LLMClient):
         response_format = self._build_response_format()
 
         if self.debug_llm:
-            logger.info(
-                "🔍 [DEBUG-LLM] --- System prompt (%d chars) ---\n%s",
-                len(system_prompt),
-                system_prompt,
-            )
+            if system_prompt == self._last_system_prompt:
+                logger.info(
+                    "🔍 [DEBUG-LLM] --- [EXISTING SYSTEM PROMPT] (%d chars) ---",
+                    len(system_prompt),
+                )
+            else:
+                logger.info(
+                    "🔍 [DEBUG-LLM] --- System prompt (%d chars) ---\n%s",
+                    len(system_prompt),
+                    system_prompt,
+                )
+                self._last_system_prompt = system_prompt
             logger.info(
                 "🔍 [DEBUG-LLM] --- User prompt (%d chars) ---\n%s",
                 len(user_prompt),

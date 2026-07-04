@@ -34,12 +34,15 @@ class Capturer:
     correct logical position.
     """
 
-    def __init__(self, scale: float = 0.0) -> None:
+    def __init__(self, scale: float = 0.0, debug: bool = False) -> None:
         # ``scale`` acts as a manual override.  When zero (default), the
         # capturer will auto-detect the display scale factor where possible.
         self._manual_scale = scale if scale > 0 else None
         self._mss_available = False
         self._mss = None
+        self.debug = debug
+        if self.debug:
+            logger.info("🔍 [DEBUG-SCREEN] Capturer initialised in debug mode.")
 
         # Try to import mss (fast cross-platform capture)
         try:
@@ -274,7 +277,14 @@ class Capturer:
         different, so we multiply by the scale factor to map to what
         ``pyautogui`` expects.
         """
-        return (int(x * self._scale), int(y * self._scale))
+        scaled_x = int(x * self._scale)
+        scaled_y = int(y * self._scale)
+        if self.debug:
+            logger.info(
+                "🔍 [DEBUG-SCREEN] scale_coordinates: raw=(%.1f, %.1f) × scale=%.4f → scaled=(%d, %d)",
+                x, y, self._scale, scaled_x, scaled_y,
+            )
+        return (scaled_x, scaled_y)
 
     def click(self, x: int, y: int) -> None:
         """Click at the given *already-scaled* logical coordinates.
@@ -289,12 +299,37 @@ class Capturer:
         """
         import pyautogui
 
+        # Re-check accessibility before each click when debugging
+        if self.debug and sys.platform == "darwin":
+            try:
+                pos = pyautogui.position()
+                pyautogui.moveTo(pos.x, pos.y)
+                logger.info("🔍 [DEBUG-SCREEN] Accessibility re-check OK — can move mouse.")
+            except Exception as exc:
+                logger.warning(
+                    "🔍 [DEBUG-SCREEN] Accessibility check FAILED before click: %s — "
+                    "click may silently fail!", exc,
+                )
+
         # Log current position for debugging click misalignment
         pos_before = pyautogui.position()
 
+        if self.debug:
+            logger.info(
+                "🔍 [DEBUG-SCREEN] About to click(%d, %d) — mouse currently at (%d, %d)",
+                x, y, pos_before.x, pos_before.y,
+            )
+
         pyautogui.click(x, y)
 
+        pos_after = pyautogui.position()
         logger.debug(
             "🖱️  click(%d, %d) — mouse was at (%d, %d), moved to (%d, %d)",
-            x, y, pos_before.x, pos_before.y, x, y,
+            x, y, pos_before.x, pos_before.y, pos_after.x, pos_after.y,
         )
+
+        if self.debug:
+            logger.info(
+                "🔍 [DEBUG-SCREEN] click(%d, %d) completed — mouse now at (%d, %d)",
+                x, y, pos_after.x, pos_after.y,
+            )

@@ -149,6 +149,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Log full LLM prompts and raw responses for debugging.",
     )
     parser.add_argument(
+        "--debug-harness",
+        action="store_true",
+        help="Log per-step action parsing, coordinate scaling, bounds checks, and stuck detection details.",
+    )
+    parser.add_argument(
+        "--debug-screen",
+        action="store_true",
+        help="Log screen capture details, coordinate transformations, accessibility checks, and click position tracking.",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -661,6 +671,8 @@ def main(argv: list[str] | None = None) -> None:
             dry_run=args.dry_run,
             run_id=args.run_id,
             runs_dir=args.runs_dir,
+            debug_harness=args.debug_harness,
+            debug_screen=args.debug_screen,
         )
         exit_code = harness.run()
     finally:

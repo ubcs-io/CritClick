@@ -58,12 +58,16 @@ class Harness:
         dry_run: bool = False,
         run_id: str | None = None,
         runs_dir: str | Path = "runs",
+        debug_harness: bool = False,
+        debug_screen: bool = False,
     ) -> None:
         self.settings = settings
         self.launcher = launcher
         self.llm = llm_client
         self.dry_run = dry_run
-        self.capturer = Capturer(scale=settings.harness.screen_scale)
+        self.debug_harness = debug_harness
+        self.debug_screen = debug_screen
+        self.capturer = Capturer(scale=settings.harness.screen_scale, debug=debug_screen)
 
         # Run namespacing — when run_id is set, outputs go under
         # ``<runs_dir>/<run_id>/`` instead of the flat cwd paths.
@@ -296,7 +300,21 @@ class Harness:
             logger.warning("Step %d/%d | ⚠️  Invalid LLM response (schema): %s", self.step, self.settings.harness.max_steps, exc)
             return "unknown"
 
-        # 5. Log narrative
+        # 5. Debug: log full parsed ActionResponse
+        if self.debug_harness:
+            logger.info(
+                "🔍 [DEBUG-HARNESS] Step %d/%d | ActionResponse: action=%s | coords=%s | text=%s | key=%s | narrative=%s | reasoning=%s",
+                self.step,
+                self.settings.harness.max_steps,
+                response.action.value,
+                response.coordinates,
+                response.text_to_type,
+                response.key_to_press,
+                response.narrative,
+                response.reasoning,
+            )
+
+        # 6. Log narrative
         logger.info(
             "📝 Step %d/%d | %s",
             self.step,
@@ -306,7 +324,7 @@ class Harness:
         self.context_window.append(f"Step {self.step}: {response.narrative}")
         self._write_log_entry(response, image_b64, duration_ms)
 
-        # 6. Execute
+        # 7. Execute
         return self._execute(response)
 
     # ------------------------------------------------------------------
@@ -316,12 +334,26 @@ class Harness:
     def _execute(self, response: ActionResponse) -> str:
         action = response.action.value
 
+        if self.debug_harness:
+            logger.info(
+                "🔍 [DEBUG-HARNESS] Step %d/%d | Executing action='%s' | dry_run=%s",
+                self.step, self.settings.harness.max_steps, action, self.dry_run,
+            )
+
         # Stuck detection
         if action == self.last_action:
             self.stuck_counter += 1
         else:
             self.stuck_counter = 0
         self.last_action = action
+
+        if self.debug_harness:
+            logger.info(
+                "🔍 [DEBUG-HARNESS] Step %d/%d | stuck_counter=%d (threshold=%d) | last_action='%s'",
+                self.step, self.settings.harness.max_steps,
+                self.stuck_counter, self.settings.harness.stuck_threshold,
+                self.last_action,
+            )
 
         if self.stuck_counter >= self.settings.harness.stuck_threshold:
             logger.warning(
@@ -336,17 +368,34 @@ class Harness:
         self.action_counts[action] = self.action_counts.get(action, 0) + 1
 
         if action == "done":
+            if self.debug_harness:
+                logger.info(
+                    "🔍 [DEBUG-HARNESS] Step %d/%d | Action 'done' → returning 'completed'",
+                    self.step, self.settings.harness.max_steps,
+                )
             logger.info("Step %d/%d | 🏁 Game ended or returned to main menu.", self.step, self.settings.harness.max_steps)
             return "completed"
 
         if action == "wait":
             wait_time = self.settings.harness.wait_duration
+            if self.debug_harness:
+                logger.info(
+                    "🔍 [DEBUG-HARNESS] Step %d/%d | Action 'wait' → sleeping %.1fs",
+                    self.step, self.settings.harness.max_steps, wait_time,
+                )
             logger.info("Step %d/%d | ⏳ Waiting %ss for scene to stabilise…", self.step, self.settings.harness.max_steps, wait_time)
             if not self.dry_run:
                 time.sleep(wait_time)
             return "waited"
 
         if action == "click":
+            if self.debug_harness:
+                logger.info(
+                    "🔍 [DEBUG-HARNESS] Step %d/%d | Action 'click' | raw_coords=%s | capturer.scale=%.4f",
+                    self.step, self.settings.harness.max_steps,
+                    response.coordinates, self.capturer.scale,
+                )
+
             if len(response.coordinates) < 2:
                 logger.warning("Step %d/%d | ⚠️  'click' action without valid coordinates — skipping.", self.step, self.settings.harness.max_steps)
                 return "unknown"
@@ -355,8 +404,21 @@ class Harness:
                 response.coordinates[0], response.coordinates[1]
             )
 
+            if self.debug_harness:
+                res_w, res_h = self.settings.game.resolution
+                logger.info(
+                    "🔍 [DEBUG-HARNESS] Step %d/%d | Scaled coords: (%d, %d) | resolution: %dx%d | margin=50",
+                    self.step, self.settings.harness.max_steps, x, y, res_w, res_h,
+                )
+
             # Bounds validation
             if not self._validate_coordinates(x, y):
+                if self.debug_harness:
+                    res_w, res_h = self.settings.game.resolution
+                    logger.warning(
+                        "🔍 [DEBUG-HARNESS] Step %d/%d | BOUNDS CHECK FAILED: (%d, %d) outside expected %dx%d (±50 margin)",
+                        self.step, self.settings.harness.max_steps, x, y, res_w, res_h,
+                    )
                 logger.warning(
                     "Step %d/%d | ⚠️  Click coordinates (%d, %d) are outside expected window bounds — skipping.",
                     self.step,
@@ -364,6 +426,12 @@ class Harness:
                     x, y,
                 )
                 return "unknown"
+
+            if self.debug_harness:
+                logger.info(
+                    "🔍 [DEBUG-HARNESS] Step %d/%d | Bounds check passed — proceeding with click",
+                    self.step, self.settings.harness.max_steps,
+                )
 
             if not self.dry_run:
                 self.capturer.click(x, y)
@@ -374,6 +442,11 @@ class Harness:
 
         if action == "type":
             text = response.text_to_type or ""
+            if self.debug_harness:
+                logger.info(
+                    "🔍 [DEBUG-HARNESS] Step %d/%d | Action 'type' | text='%s' | length=%d",
+                    self.step, self.settings.harness.max_steps, text, len(text),
+                )
             if not self.dry_run:
                 pyautogui.write(text, interval=0.05)
                 logger.info("Step %d/%d | ⌨️  Typed: %s", self.step, self.settings.harness.max_steps, text)
@@ -383,6 +456,11 @@ class Harness:
 
         if action == "press":
             key = response.key_to_press or ""
+            if self.debug_harness:
+                logger.info(
+                    "🔍 [DEBUG-HARNESS] Step %d/%d | Action 'press' | key='%s'",
+                    self.step, self.settings.harness.max_steps, key,
+                )
             if not key:
                 logger.warning("Step %d/%d | ⚠️  'press' action without key_to_press — skipping.", self.step, self.settings.harness.max_steps)
                 return "unknown"
