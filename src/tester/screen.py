@@ -17,7 +17,7 @@ import sys
 from io import BytesIO
 from typing import TYPE_CHECKING
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from .window import WindowInfo
 
@@ -598,3 +598,128 @@ class Capturer:
                 "🔍 [DEBUG-SCREEN] click(%d, %d) completed — mouse now at (%d, %d)",
                 x, y, pos_after.x, pos_after.y,
             )
+
+    # ------------------------------------------------------------------
+    # Debug overlay drawing
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def draw_debug_overlay(
+        image: Image.Image,
+        *,
+        bounding_box: list[float] | None = None,
+        click_point: tuple[int, int] | None = None,
+        metadata: dict[str, str] | None = None,
+    ) -> Image.Image:
+        """Draw debug annotations on a copy of *image* and return it.
+
+        Annotations drawn (when the relevant data is provided):
+
+        * **bounding_box** — green rectangle with label
+        * **click_point** — lime crosshair (10 px arms)
+        * **metadata** — semi-transparent panel in the top‑left corner
+          with each key: value on its own line
+
+        The original *image* is **not** modified; a new RGBA image is
+        returned.
+
+        Args:
+            image: The captured game‑window screenshot (PIL Image).
+            bounding_box: ``[x1, y1, x2, y2]`` in image‑pixel coords.
+            click_point: ``(cx, cy)`` centre point that was/would be clicked.
+            metadata: Dict of string labels → string values to display.
+
+        Returns:
+            A new ``PIL.Image.Image`` with annotations drawn on top.
+        """
+        # Work on an RGBA copy so we can use transparency
+        base = image.convert("RGBA")
+        overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+
+        # --- font selection ---
+        font = None
+        font_small = None
+        for font_name in (
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "arial.ttf",
+            "Arial.ttf",
+        ):
+            try:
+                font = ImageFont.truetype(font_name, 18)
+                font_small = ImageFont.truetype(font_name, 14)
+                break
+            except Exception:
+                continue
+        if font is None:
+            font = ImageFont.load_default()
+            font_small = font
+
+        # --- bounding box ---
+        if bounding_box is not None and len(bounding_box) == 4:
+            x1, y1, x2, y2 = [int(v) for v in bounding_box]
+            # Normalise order
+            if x1 > x2:
+                x1, x2 = x2, x1
+            if y1 > y2:
+                y1, y2 = y2, y1
+            draw.rectangle([x1, y1, x2, y2], outline=(0, 255, 0, 220), width=3)
+            label = f"bbox [{x1},{y1},{x2},{y2}]"
+            # Place label above the box if there's room, otherwise inside
+            label_y = y1 - 22 if y1 >= 24 else y1 + 4
+            # Draw a background rectangle behind the label for readability
+            bbox_text = draw.textbbox((x1, label_y), label, font=font_small)
+            draw.rectangle(
+                [bbox_text[0] - 3, bbox_text[1] - 1, bbox_text[2] + 3, bbox_text[3] + 1],
+                fill=(0, 0, 0, 180),
+            )
+            draw.text((x1, label_y), label, fill=(0, 255, 0, 255), font=font_small)
+
+        # --- click point crosshair ---
+        if click_point is not None:
+            cx, cy = click_point
+            lime = (50, 255, 50, 240)
+            arm = 12
+            draw.line([(cx - arm, cy), (cx + arm, cy)], fill=lime, width=2)
+            draw.line([(cx, cy - arm), (cx, cy + arm)], fill=lime, width=2)
+            # Small centre dot
+            draw.ellipse([cx - 3, cy - 3, cx + 3, cy + 3], fill=lime)
+
+        # --- metadata panel ---
+        if metadata:
+            lines = [f"{k}: {v}" for k, v in metadata.items()]
+            if lines:
+                # Measure the widest line to size the panel
+                max_width = 0
+                line_heights: list[tuple[int, int, int, int]] = []
+                for line in lines:
+                    bbox_t = draw.textbbox((0, 0), line, font=font_small)
+                    line_heights.append(bbox_t)
+                    w = bbox_t[2] - bbox_t[0]
+                    if w > max_width:
+                        max_width = w
+                line_h = line_heights[0][3] - line_heights[0][1] + 4
+                panel_h = len(lines) * line_h + 12
+                panel_w = max_width + 20
+
+                # Draw semi-transparent panel background
+                draw.rectangle(
+                    [6, 6, 6 + panel_w, 6 + panel_h],
+                    fill=(0, 0, 0, 175),
+                    outline=(255, 255, 255, 100),
+                    width=1,
+                )
+
+                for i, line in enumerate(lines):
+                    draw.text(
+                        (16, 12 + i * line_h),
+                        line,
+                        fill=(255, 255, 255, 240),
+                        font=font_small,
+                    )
+
+        # Composite overlay onto base
+        result = Image.alpha_composite(base, overlay)
+        return result

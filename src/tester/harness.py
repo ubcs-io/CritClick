@@ -10,9 +10,11 @@ import logging
 import os
 import time
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 
 import pyautogui
+from PIL import Image
 
 from .client import LLMClient
 from .config import Settings
@@ -307,7 +309,12 @@ class Harness:
         """
         # 1. Capture
         try:
-            image_b64 = self.capturer.capture_base64()
+            pil_image = self.capturer.capture_pil()
+            # Encode to base64 for the LLM
+            buf = BytesIO()
+            pil_image.save(buf, format="PNG")
+            import base64
+            image_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         except ScreenCaptureError as exc:
             logger.error("Step %d/%d | 💥 Screen capture failed: %s", self.step, self.settings.harness.max_steps, exc)
             return "unknown"
@@ -361,7 +368,11 @@ class Harness:
         self.context_window.append(f"Step {self.step}: {response.narrative}")
         self._write_log_entry(response, image_b64, duration_ms)
 
-        # 7. Execute
+        # 7. Generate debug overlay image (when debug_screen is enabled)
+        if self.debug_screen and self.run_id:
+            self._save_debug_overlay(pil_image, response)
+
+        # 8. Execute
         return self._execute(response)
 
     # ------------------------------------------------------------------
@@ -672,6 +683,66 @@ class Harness:
 
         with open(log_settings.log_file, "a", encoding="utf-8") as fh:
             fh.write(entry.model_dump_json() + "\n")
+
+    # ------------------------------------------------------------------
+    # Debug overlay
+    # ------------------------------------------------------------------
+
+    def _save_debug_overlay(self, image: Image.Image, response: ActionResponse) -> None:
+        """Draw debug annotations on *image* and save to the run directory.
+
+        Only called when ``debug_screen`` is enabled and ``run_id`` is set.
+        Produces ``debug_step_NNNN.png`` files in the run directory.
+        """
+        try:
+            # Determine bounding box and click point from the response
+            bounding_box: list[float] | None = None
+            click_point: tuple[int, int] | None = None
+
+            bb = response.bounding_box
+            if bb is not None and len(bb) == 4:
+                bounding_box = list(bb)
+                # Compute centre in image-pixel space (before scale + offset)
+                cx = int((bb[0] + bb[2]) / 2)
+                cy = int((bb[1] + bb[3]) / 2)
+                click_point = (cx, cy)
+
+            # Build metadata dict
+            metadata: dict[str, str] = {
+                "Step": str(self.step),
+                "Action": response.action.value,
+            }
+            if response.bounding_box:
+                metadata["BBox"] = (
+                    f"[{response.bounding_box[0]:.0f}, {response.bounding_box[1]:.0f}, "
+                    f"{response.bounding_box[2]:.0f}, {response.bounding_box[3]:.0f}]"
+                )
+            elif response.coordinates:
+                metadata["Coords"] = str(response.coordinates)
+            if click_point:
+                metadata["ClickPt (img)"] = str(click_point)
+            metadata["Scale"] = f"{self.capturer.scale:.4f}"
+            if self.capturer.game_window:
+                gw = self.capturer.game_window
+                metadata["Window"] = f"{gw.x},{gw.y} {gw.width}x{gw.height}"
+
+            # Draw the overlay
+            annotated = Capturer.draw_debug_overlay(
+                image,
+                bounding_box=bounding_box,
+                click_point=click_point,
+                metadata=metadata,
+            )
+
+            # Save
+            run_dir = self.runs_dir / self.run_id  # type: ignore[arg-type]
+            os.makedirs(run_dir, exist_ok=True)
+            out_path = run_dir / f"debug_step_{self.step:04d}.png"
+            annotated.save(str(out_path), format="PNG")
+            logger.info("📸 Debug overlay saved → %s", out_path)
+
+        except Exception as exc:
+            logger.warning("⚠️  Failed to save debug overlay for step %d: %s", self.step, exc)
 
     def _log_summary(self) -> None:
         """Log a run summary at the end of the playthrough."""

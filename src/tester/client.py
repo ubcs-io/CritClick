@@ -50,7 +50,26 @@ class HttpxUrlFilter(logging.Filter):
             except Exception:
                 endpoint = "/"
             redacted = f"...{endpoint}"
-            record.msg = record.msg.replace(full_url, redacted)
+
+            # Scrub from record.msg (handles f-string / direct format style)
+            if isinstance(record.msg, str):
+                record.msg = record.msg.replace(full_url, redacted)
+
+            # Scrub from record.args (handles %s-style format where the URL
+            # lives in positional arguments — this is how httpx logs).
+            if record.args:
+                if isinstance(record.args, tuple):
+                    record.args = tuple(
+                        a.replace(full_url, redacted) if isinstance(a, str) else a
+                        for a in record.args
+                    )
+                elif isinstance(record.args, dict):
+                    record.args = {
+                        k: v.replace(full_url, redacted) if isinstance(v, str) else v
+                        for k, v in record.args.items()
+                    }
+                elif isinstance(record.args, str):
+                    record.args = record.args.replace(full_url, redacted)
         return True
 
 
