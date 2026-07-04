@@ -84,6 +84,18 @@ class Capturer:
         # Populated by set_game_window() — used for cropping and offset.
         self._game_window_physical: WindowInfo | None = None
 
+        # --- Model coordinate-space handling ----------------------------------
+        # Size (physical px) of the most recent capture — the pixel space the
+        # model's coordinates should map into.
+        self._last_capture_size: tuple[int, int] | None = None
+        # Config fallback: if > 0, the model reports coordinates normalized to
+        # [0, coordinate_max] per axis (e.g. 1000 for Qwen-VL).
+        self._coordinate_max: float = 0.0
+        # Per-axis affine transform (a_x, b_x, a_y, b_y) from model space to
+        # capture-pixel space, learned by the calibration probe. Takes
+        # precedence over _coordinate_max when set.
+        self._calibration: tuple[float, float, float, float] | None = None
+
         # --- macOS accessibility check ----------------------------------------
         if sys.platform == "darwin":
             self._check_accessibility()
@@ -144,6 +156,51 @@ class Capturer:
     def game_window(self) -> WindowInfo | None:
         """The currently bound game window, or ``None``."""
         return self._game_window
+
+    @property
+    def last_capture_size(self) -> tuple[int, int] | None:
+        """Physical-pixel size of the most recent capture, or ``None``."""
+        return self._last_capture_size
+
+    def set_coordinate_max(self, coordinate_max: float) -> None:
+        """Set the config fallback for normalized model coordinates.
+
+        ``coordinate_max`` is the per-axis range the model normalizes to
+        (e.g. ``1000`` for Qwen-VL). ``0`` means coordinates are raw pixels.
+        """
+        self._coordinate_max = max(0.0, float(coordinate_max))
+
+    def set_coordinate_calibration(
+        self, calibration: tuple[float, float, float, float] | None
+    ) -> None:
+        """Set the learned affine transform ``(a_x, b_x, a_y, b_y)``.
+
+        Maps model-space coordinates into capture-pixel space via
+        ``pixel = a * model + b`` per axis. ``None`` clears it (falls back to
+        ``coordinate_max`` or identity).
+        """
+        self._calibration = calibration
+        if self.debug and calibration is not None:
+            logger.info(
+                "🔍 [DEBUG-SCREEN] Coordinate calibration set: "
+                "x_px=%.4f·x+%.1f | y_px=%.4f·y+%.1f",
+                calibration[0], calibration[1], calibration[2], calibration[3],
+            )
+
+    def _to_pixel_space(self, x: float, y: float) -> tuple[float, float]:
+        """Map model-reported coords into capture-pixel space.
+
+        Applies, in precedence order: the learned calibration transform, then
+        the ``coordinate_max`` normalization fallback, else identity (the model
+        already reports pixels).
+        """
+        if self._calibration is not None:
+            ax, bx, ay, by = self._calibration
+            return (ax * x + bx, ay * y + by)
+        if self._coordinate_max > 0 and self._last_capture_size is not None:
+            w, h = self._last_capture_size
+            return (x / self._coordinate_max * w, y / self._coordinate_max * h)
+        return (x, y)
 
     @property
     def scale(self) -> float:
@@ -369,6 +426,8 @@ class Capturer:
                     )
             img = img.crop(crop_box)
 
+        # Remember the pixel space the model will report coordinates in.
+        self._last_capture_size = img.size
         return img
 
     def _capture_full_screen(self) -> Image.Image:
@@ -498,10 +557,22 @@ class Capturer:
         game's output at native resolution.  No separate window→game
         resolution scale is needed — the LLM coordinates are already
         in the game's pixel space.
+
+        A preliminary step maps the model's coordinate convention (raw
+        pixels, normalized [0, coordinate_max], or a calibrated affine
+        transform) into that capture-pixel space via ``_to_pixel_space()``.
         """
+        # Map model-space coords → capture-pixel space (calibration / normalization)
+        px, py = self._to_pixel_space(x, y)
+        if self.debug and (px != x or py != y):
+            logger.info(
+                "🔍 [DEBUG-SCREEN] model-space (%.1f, %.1f) → capture-pixel (%.1f, %.1f)",
+                x, y, px, py,
+            )
+
         # Map physical-pixel coords → logical points
-        scaled_x = int(x * self._scale)
-        scaled_y = int(y * self._scale)
+        scaled_x = int(px * self._scale)
+        scaled_y = int(py * self._scale)
 
         # Offset by game window position (logical points, since pyautogui
         # operates in logical space)
@@ -705,6 +776,51 @@ class Capturer:
             _label(w - 1, gy, str(gy), "right-middle")
 
         return Image.alpha_composite(base, overlay)
+
+    @staticmethod
+    def draw_calibration_markers(
+        size: tuple[int, int],
+        *,
+        fractions: tuple[tuple[float, float], ...] = (
+            (0.2, 0.2), (0.8, 0.2), (0.2, 0.8), (0.8, 0.8),
+        ),
+    ) -> tuple[Image.Image, list[tuple[int, int, int]]]:
+        """Render a calibration probe image with numbered crosshair markers.
+
+        Markers are placed at *fractions* of the image size (default: one per
+        quadrant at 20%/80%). Each is a bold crosshair with a number label.
+
+        Args:
+            size: ``(width, height)`` of the probe image, which MUST match the
+                real capture size so the model's coordinate convention (which
+                can depend on image dimensions) is identical.
+            fractions: ``(fx, fy)`` positions of each marker, in [0, 1].
+
+        Returns:
+            ``(image, markers)`` where *markers* is a list of
+            ``(label, x, y)`` known center positions in image-pixel space.
+        """
+        w, h = size
+        img = Image.new("RGBA", (w, h), (24, 26, 32, 255))
+        draw = ImageDraw.Draw(img)
+        font, _ = Capturer._load_overlay_fonts()
+
+        markers: list[tuple[int, int, int]] = []
+        arm = max(12, min(w, h) // 40)
+        color = (255, 60, 60, 255)
+        for i, (fx, fy) in enumerate(fractions, start=1):
+            cx = int(round(fx * w))
+            cy = int(round(fy * h))
+            draw.line([(cx - arm, cy), (cx + arm, cy)], fill=color, width=3)
+            draw.line([(cx, cy - arm), (cx, cy + arm)], fill=color, width=3)
+            draw.ellipse([cx - 4, cy - 4, cx + 4, cy + 4], fill=color)
+            # Label offset toward image center so it never clips the edge
+            lx = cx + (arm + 6 if fx < 0.5 else -arm - 22)
+            ly = cy + (arm + 4 if fy < 0.5 else -arm - 22)
+            draw.text((lx, ly), str(i), fill=(255, 255, 255, 255), font=font)
+            markers.append((i, cx, cy))
+
+        return img.convert("RGB"), markers
 
     @staticmethod
     def draw_debug_overlay(

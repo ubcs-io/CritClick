@@ -158,13 +158,26 @@ class HarnessSettings(BaseModel):
         description="Multiplier for LLM-returned coordinates (handles DPI mismatches).",
     )
     coordinate_grid: bool = Field(
-        default=True,
+        default=False,
         description="If True, overlay a labeled coordinate grid on screenshots "
-        "sent to the model so it can read click coordinates off reference lines.",
+        "sent to the model so it can read click coordinates off reference lines. "
+        "Usually unnecessary for models that ground natively (e.g. Qwen-VL); "
+        "prefer coordinate calibration instead.",
     )
     grid_spacing: int = Field(
         default=100, ge=20, le=500,
         description="Pixel spacing between gridlines when coordinate_grid is enabled.",
+    )
+    coordinate_calibration: bool = Field(
+        default=True,
+        description="If True, run a one-time calibration probe at startup to learn "
+        "how the model's returned coordinates map to image pixels (handles models "
+        "that emit normalized/resized coordinates, e.g. Qwen-VL's 0-1000 space).",
+    )
+    coordinate_max: int = Field(
+        default=0, ge=0,
+        description="Fallback for the model's coordinate convention when calibration "
+        "is disabled or fails. 0 = raw pixels; e.g. 1000 = normalized 0-1000 per axis.",
     )
     headless: bool = Field(
         default=False,

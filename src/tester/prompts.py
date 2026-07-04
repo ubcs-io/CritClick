@@ -128,6 +128,34 @@ Step-by-step log:
 What was the key complaint? Output ONLY valid JSON."""
 
 
+# ---------------------------------------------------------------------------
+# Coordinate-calibration probe
+# ---------------------------------------------------------------------------
+
+CALIBRATION_SYSTEM_PROMPT = """You are a precise visual localization tool. You will be shown an image containing several numbered crosshair markers (a '+' symbol with a number beside it) on a plain background.
+
+For EACH marker, report:
+- "label": the integer printed next to that marker.
+- "x", "y": the pixel coordinates of the exact CENTER of the '+' crosshair.
+
+Report every marker you can see. Use whatever coordinate convention you normally use for locations in an image — do not second-guess it. Output ONLY valid JSON matching the expected schema."""
+
+
+CALIBRATION_USER_PROMPT = """Locate every numbered crosshair marker in this image.
+For each one, return its label and the (x, y) pixel coordinates of the center of the '+'.
+Output ONLY valid JSON matching the expected schema."""
+
+
+def make_calibration_system_prompt(custom: str | None = None) -> str:
+    """Return the calibration system prompt, preferring a user-supplied override."""
+    return (custom or CALIBRATION_SYSTEM_PROMPT).strip()
+
+
+def make_calibration_user_prompt() -> str:
+    """Return the calibration user prompt."""
+    return CALIBRATION_USER_PROMPT.strip()
+
+
 def make_recap_system_prompt(custom: str | None = None) -> str:
     """Return the recap system prompt, preferring a user-supplied override."""
     return (custom or RECAP_SYSTEM_PROMPT).strip()

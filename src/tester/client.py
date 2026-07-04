@@ -13,7 +13,7 @@ import re
 import time
 from abc import ABC, abstractmethod
 
-from .models import ActionResponse
+from .models import ActionResponse, CalibrationResponse
 
 logger = logging.getLogger("tester.client")
 
@@ -74,6 +74,15 @@ class LLMClient(ABC):
         """
         ...
 
+    @abstractmethod
+    def locate_markers(self, image_b64: str, system_prompt: str, user_prompt: str) -> dict:
+        """Locate numbered calibration markers in a probe image.
+
+        Returns:
+            A dictionary matching the ``CalibrationResponse`` schema.
+        """
+        ...
+
 
 class OpenAIClient(LLMClient):
     """Client for any OpenAI-compatible API endpoint.
@@ -114,16 +123,34 @@ class OpenAIClient(LLMClient):
 
         self._client = OpenAI(api_key=api_key or "", base_url=self.api_base)
 
+    def locate_markers(self, image_b64: str, system_prompt: str, user_prompt: str) -> dict:
+        """Send the calibration probe image and return located markers.
+
+        Uses the same retrying request machinery as :meth:`analyze` but with the
+        ``CalibrationResponse`` schema. Returns a dict matching that schema.
+        """
+        response_format = self._build_response_format(
+            CalibrationResponse, name="calibration_markers"
+        )
+        return self._request(image_b64, system_prompt, user_prompt, response_format)
+
     def analyze(self, image_b64: str, system_prompt: str, user_prompt: str) -> dict:
         """Send a vision + text request to the LLM and return structured output.
 
         Retries on transient failures (API errors, invalid JSON) using exponential
         backoff up to ``max_retries`` times.
         """
-
-        # Build the JSON schema from the Pydantic model so the LLM returns valid data
         response_format = self._build_response_format()
+        return self._request(image_b64, system_prompt, user_prompt, response_format)
 
+    def _request(
+        self,
+        image_b64: str,
+        system_prompt: str,
+        user_prompt: str,
+        response_format: dict,
+    ) -> dict:
+        """Shared vision request loop with retries and structured-JSON parsing."""
         if self.debug_llm:
             if system_prompt == self._last_system_prompt:
                 logger.info(
@@ -256,14 +283,15 @@ class OpenAIClient(LLMClient):
         logger.info("⏳ Retrying in %.1fs (exponential backoff)…", delay)
         time.sleep(delay)
 
-    def _build_response_format(self) -> dict:
-        """Build an OpenAI `response_format` dict from the ActionResponse schema."""
-        schema = ActionResponse.model_json_schema()
-        # Remove top-level schema keys that OpenAI doesn't expect
+    def _build_response_format(
+        self, model: type = ActionResponse, name: str = "game_action"
+    ) -> dict:
+        """Build an OpenAI `response_format` dict from a Pydantic model's schema."""
+        schema = model.model_json_schema()
         return {
             "type": "json_schema",
             "json_schema": {
-                "name": "game_action",
+                "name": name,
                 "strict": True,
                 "schema": schema,
             },

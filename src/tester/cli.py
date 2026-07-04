@@ -164,6 +164,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable the coordinate-grid overlay drawn on screenshots sent to the model.",
     )
     parser.add_argument(
+        "--no-calibration",
+        action="store_true",
+        help="Skip the startup coordinate-calibration probe (use coordinate_max/pixels as-is).",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -605,6 +610,11 @@ def main(argv: list[str] | None = None) -> None:
     if args.no_grid:
         settings.harness.coordinate_grid = False
         logger.info("🧭 Coordinate-grid overlay disabled via --no-grid")
+
+    # --no-calibration skips the startup coordinate-calibration probe
+    if args.no_calibration:
+        settings.harness.coordinate_calibration = False
+        logger.info("🧭 Coordinate calibration disabled via --no-calibration")
 
     logger.info("Configuration loaded | game=%s | endpoint=%s", settings.game.path, settings.llm.api_base)
 

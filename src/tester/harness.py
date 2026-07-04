@@ -19,8 +19,10 @@ from PIL import Image
 from .client import LLMClient
 from .config import Settings
 from .launcher import Launcher, capture_git_info
-from .models import ActionResponse, LogEntry, RecapReport
+from .models import ActionResponse, CalibrationResponse, LogEntry, RecapReport
 from .prompts import (
+    make_calibration_system_prompt,
+    make_calibration_user_prompt,
     make_recap_system_prompt,
     make_recap_user_prompt,
     make_system_prompt,
@@ -80,6 +82,9 @@ class Harness:
             debug=debug_screen,
             game_resolution=tuple(settings.game.resolution),
         )
+        # Config fallback for the model's coordinate convention (used when
+        # calibration is disabled or fails).
+        self.capturer.set_coordinate_max(settings.harness.coordinate_max)
 
         # Run namespacing — when run_id is set, outputs go under
         # ``<runs_dir>/<run_id>/`` instead of the flat cwd paths.
@@ -138,12 +143,138 @@ class Harness:
         lg.screenshot_dir = str(run_dir / "screenshots")
 
     def _setup_output(self) -> None:
-        """Create screenshot dir and ensure the log file path is ready."""
+        """Create screenshot dir and initialise the log file for a fresh run."""
         log_settings = self.settings.logging
         if log_settings.save_screenshots:
             os.makedirs(log_settings.screenshot_dir, exist_ok=True)
-        # Touch the log file
+        # Truncate the log file so the recap only sees this run's entries.
+        # Prior runs were written to the same path in legacy mode (no run_id)
+        # or when a run_id is reused; keeping them would pollute the summary.
         Path(log_settings.log_file).parent.mkdir(parents=True, exist_ok=True)
+        open(log_settings.log_file, "w", encoding="utf-8").close()
+
+    # ------------------------------------------------------------------
+    # Coordinate calibration
+    # ------------------------------------------------------------------
+
+    def _calibrate_coordinates(self) -> None:
+        """Learn how the model's coordinates map to pixels via a probe image.
+
+        Renders a probe with numbered markers at known pixel positions, asks
+        the model to locate them, and fits a per-axis affine transform
+        (``pixel = a·model + b``). On success the transform is applied to all
+        clicks; on failure we keep the ``coordinate_max`` fallback (or identity).
+        """
+        try:
+            import base64
+
+            # Probe must match the real capture size — a model's coordinate
+            # convention can depend on the input image dimensions.
+            probe_size = self.capturer.capture_pil().size
+            probe_w, probe_h = probe_size
+            probe_img, markers = Capturer.draw_calibration_markers(probe_size)
+
+            buf = BytesIO()
+            probe_img.save(buf, format="PNG")
+            image_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+            raw = self.llm.locate_markers(
+                image_b64,
+                make_calibration_system_prompt(),
+                make_calibration_user_prompt(),
+            )
+            parsed = CalibrationResponse.model_validate(raw)
+
+            # Match reported markers to known positions by label.
+            known = {label: (x, y) for label, x, y in markers}
+            model_x: list[float] = []
+            pixel_x: list[float] = []
+            model_y: list[float] = []
+            pixel_y: list[float] = []
+            for m in parsed.markers:
+                if m.label in known:
+                    kx, ky = known[m.label]
+                    model_x.append(m.x)
+                    pixel_x.append(kx)
+                    model_y.append(m.y)
+                    pixel_y.append(ky)
+
+            if len(model_x) < 2:
+                logger.warning(
+                    "🧭 Calibration: model returned %d usable markers (<2) — "
+                    "keeping fallback (coordinate_max=%s).",
+                    len(model_x), self.settings.harness.coordinate_max,
+                )
+                return
+
+            fit_x = self._fit_linear(model_x, pixel_x)
+            fit_y = self._fit_linear(model_y, pixel_y)
+            if fit_x is None or fit_y is None:
+                logger.warning("🧭 Calibration: degenerate fit — keeping fallback.")
+                return
+
+            ax, bx = fit_x
+            ay, by = fit_y
+            if ax <= 0.01 or ay <= 0.01:
+                logger.warning(
+                    "🧭 Calibration: implausible scale (a_x=%.4f, a_y=%.4f) — "
+                    "keeping fallback.", ax, ay,
+                )
+                return
+
+            # Reject fits where the model localized markers poorly: the largest
+            # residual (fitted vs known pixel) must stay within a fraction of
+            # the image, otherwise the transform is untrustworthy.
+            max_res = 0.0
+            for mx, kx in zip(model_x, pixel_x):
+                max_res = max(max_res, abs(ax * mx + bx - kx))
+            for my, ky in zip(model_y, pixel_y):
+                max_res = max(max_res, abs(ay * my + by - ky))
+            tol = 0.1 * max(probe_w, probe_h)
+            if max_res > tol:
+                logger.warning(
+                    "🧭 Calibration: fit residual %.1fpx exceeds tolerance %.1fpx "
+                    "(model localized markers poorly) — keeping fallback.",
+                    max_res, tol,
+                )
+                return
+
+            self.capturer.set_coordinate_calibration((ax, bx, ay, by))
+            logger.info(
+                "🧭 Coordinate calibration learned from %d/%d markers: "
+                "x_px=%.4f·x%+.1f | y_px=%.4f·y%+.1f",
+                len(model_x), len(markers), ax, bx, ay, by,
+            )
+            if self.debug_screen:
+                for m in parsed.markers:
+                    if m.label in known:
+                        kx, ky = known[m.label]
+                        fx, fy = ax * m.x + bx, ay * m.y + by
+                        logger.info(
+                            "🧭 marker %d: model=(%.1f, %.1f) → fitted=(%.1f, %.1f) "
+                            "| known=(%d, %d) | residual=(%.1f, %.1f)",
+                            m.label, m.x, m.y, fx, fy, kx, ky, fx - kx, fy - ky,
+                        )
+
+        except Exception as exc:
+            logger.warning("🧭 Calibration probe failed: %s — keeping fallback.", exc)
+
+    @staticmethod
+    def _fit_linear(xs: list[float], ys: list[float]) -> tuple[float, float] | None:
+        """Least-squares fit ``y = a·x + b``. Returns ``(a, b)`` or None if degenerate."""
+        n = len(xs)
+        if n < 2:
+            return None
+        sx = sum(xs)
+        sy = sum(ys)
+        sxx = sum(x * x for x in xs)
+        sxy = sum(x * y for x, y in zip(xs, ys))
+        denom = n * sxx - sx * sx
+        if abs(denom) < 1e-9:
+            return None
+        a = (n * sxy - sx * sy) / denom
+        b = (sy - a * sx) / n
+        return (a, b)
 
     # ------------------------------------------------------------------
     # Main loop
@@ -201,6 +332,10 @@ class Harness:
                 logger.info(
                     "🪟 Could not determine game PID — using full-screen capture + absolute coords."
                 )
+
+            # Learn how the model's coordinates map to pixels before the loop.
+            if self.settings.harness.coordinate_calibration:
+                self._calibrate_coordinates()
 
         exit_code = EXIT_SUCCESS
         try:

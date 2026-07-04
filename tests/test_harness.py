@@ -435,3 +435,84 @@ class TestCoordinateGridApplication:
         with patch("tester.harness.Capturer.draw_coordinate_grid") as mock_grid:
             harness.analyze_and_act()
         mock_grid.assert_not_called()
+
+
+class TestCoordinateCalibration:
+    """The startup probe should learn model-space → pixel transforms."""
+
+    def test_fit_linear_recovers_scale(self):
+        from tester.harness import Harness
+
+        a, b = Harness._fit_linear([0.0, 100.0, 200.0], [0.0, 158.0, 316.0])
+        assert abs(a - 1.58) < 1e-6
+        assert abs(b) < 1e-6
+
+    def test_fit_linear_degenerate(self):
+        from tester.harness import Harness
+
+        assert Harness._fit_linear([5.0, 5.0], [1.0, 2.0]) is None  # no x variance
+        assert Harness._fit_linear([1.0], [1.0]) is None            # too few points
+
+    def _calib_harness(self, sample_settings, image_size):
+        from PIL import Image
+
+        launcher = MagicMock()
+        client = MagicMock(spec=LLMClient)
+        harness = Harness(sample_settings, launcher, client, dry_run=True)
+        harness.capturer = MagicMock()
+        harness.capturer.capture_pil.return_value = Image.new("RGB", image_size)
+        return harness, client
+
+    def test_calibration_learns_normalized_transform(self, sample_settings):
+        from tester.screen import Capturer
+
+        W, H = 1578, 916
+        harness, client = self._calib_harness(sample_settings, (W, H))
+        _, markers = Capturer.draw_calibration_markers((W, H))
+        # Model reports coordinates normalized to 0-1000 per axis (Qwen-VL style)
+        client.locate_markers.return_value = {
+            "markers": [
+                {"label": lbl, "x": kx / W * 1000, "y": ky / H * 1000}
+                for (lbl, kx, ky) in markers
+            ]
+        }
+
+        harness._calibrate_coordinates()
+
+        harness.capturer.set_coordinate_calibration.assert_called_once()
+        (calib,), _ = harness.capturer.set_coordinate_calibration.call_args
+        ax, bx, ay, by = calib
+        assert abs(ax - W / 1000) < 0.01
+        assert abs(ay - H / 1000) < 0.01
+        assert abs(bx) < 1.0 and abs(by) < 1.0
+
+    def test_calibration_falls_back_on_too_few_markers(self, sample_settings):
+        harness, client = self._calib_harness(sample_settings, (1578, 916))
+        client.locate_markers.return_value = {"markers": [{"label": 1, "x": 10, "y": 10}]}
+
+        harness._calibrate_coordinates()
+
+        harness.capturer.set_coordinate_calibration.assert_not_called()
+
+    def test_calibration_swallows_probe_error(self, sample_settings):
+        harness, client = self._calib_harness(sample_settings, (1578, 916))
+        client.locate_markers.side_effect = RuntimeError("model offline")
+
+        # Must not raise — falls back silently
+        harness._calibrate_coordinates()
+        harness.capturer.set_coordinate_calibration.assert_not_called()
+
+    def test_calibration_rejects_poor_fit(self, sample_settings):
+        from tester.screen import Capturer
+
+        W, H = 1578, 916
+        harness, client = self._calib_harness(sample_settings, (W, H))
+        _, markers = Capturer.draw_calibration_markers((W, H))
+        # Model reports near-identical coords for every marker → no real signal,
+        # so any fit has large residuals and must be rejected.
+        client.locate_markers.return_value = {
+            "markers": [{"label": lbl, "x": 500 + lbl, "y": 500 + lbl} for (lbl, _, _) in markers]
+        }
+
+        harness._calibrate_coordinates()
+        harness.capturer.set_coordinate_calibration.assert_not_called()

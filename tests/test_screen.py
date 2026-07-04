@@ -239,3 +239,54 @@ class TestCoordinateGrid:
 
         # Some pixels must differ from the flat background (lines + labels drawn)
         assert out.tobytes() != src.convert("RGB").tobytes()
+
+
+class TestCalibrationTransform:
+    """Tests for the model-coordinate → pixel-space transform."""
+
+    def test_draw_calibration_markers(self):
+        from tester.screen import Capturer
+
+        img, markers = Capturer.draw_calibration_markers((1000, 500))
+
+        assert img.size == (1000, 500)
+        assert [m[0] for m in markers] == [1, 2, 3, 4]
+        # Default 20%/80% quadrant positions
+        assert (1, 200, 100) in markers
+        assert (4, 800, 400) in markers
+
+    def test_identity_when_unconfigured(self):
+        from tester.screen import Capturer
+
+        c = Capturer(scale=1.0)
+        # No calibration, no coordinate_max → coords are raw pixels
+        assert c.scale_coordinates(123, 456) == (123, 456)
+
+    def test_coordinate_max_normalizes(self):
+        from tester.screen import Capturer
+
+        c = Capturer(scale=1.0)
+        c.set_coordinate_max(1000)
+        c._last_capture_size = (1578, 916)
+
+        x, y = c.scale_coordinates(500, 500)
+        assert x == int(500 / 1000 * 1578)  # 789
+        assert y == int(500 / 1000 * 916)   # 458
+
+    def test_calibration_affine_applied(self):
+        from tester.screen import Capturer
+
+        c = Capturer(scale=1.0)
+        c.set_coordinate_calibration((1.578, 0.0, 0.916, 0.0))
+
+        assert c.scale_coordinates(100, 100) == (int(1.578 * 100), int(0.916 * 100))
+
+    def test_calibration_takes_precedence_over_max(self):
+        from tester.screen import Capturer
+
+        c = Capturer(scale=1.0)
+        c.set_coordinate_max(1000)
+        c._last_capture_size = (1578, 916)
+        c.set_coordinate_calibration((2.0, 0.0, 2.0, 0.0))
+
+        assert c.scale_coordinates(10, 10) == (20, 20)
