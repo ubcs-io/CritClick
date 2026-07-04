@@ -39,17 +39,20 @@ COORDINATE GRID — READ COORDINATES OFF THE GRID, DO NOT ESTIMATE BY EYE:
 - Your eyeballed sense of pixel position is unreliable and will miss the target.
   You MUST anchor every coordinate to the printed grid labels instead.
 - For each "click", follow this procedure and show it in the "reasoning" field:
-  1. Find the target element on screen.
-  2. Trace to the nearest LABELED gridlines and read their numbers:
-     "left edge is just right of the x=700 line; right edge near x=900;
-      top edge at the y=400 line; bottom just below y=440".
-  3. Derive the numbers from those labels — interpolate between lines when the
-     edge falls partway. Do NOT output a value you did not read off a label.
-  4. Sanity-check: the element is at roughly x=(left+right)/2. If your numbers
-     put it far from where the element actually sits on the grid, you misread —
-     re-trace before answering.
-- A "reasoning" that does not cite specific gridline numbers means you guessed;
-  redo it against the labels.
+  1. Find the target element by LOOKING AT THIS screenshot. Do NOT assume where
+     it "usually" lives in this engine/menu — read the actual pixels in front of
+     you. Your prior about typical layouts is often wrong for this build.
+  2. Name the gridlines that physically pass THROUGH or immediately border the
+     element as drawn: "the vertical line labeled 700 runs down its left side;
+     the 900 line is just past its right side; the horizontal 400 line crosses
+     its top". Describe what you actually see the lines touching.
+  3. Derive the numbers from those lines — interpolate between them when an edge
+     falls partway. Do NOT output a value you did not read off a nearby line.
+  4. Sanity-check against the image, not your expectation: if the element clearly
+     sits in a different part of the screen than your numbers imply, you anchored
+     on an assumption — discard it and re-read the lines that actually touch it.
+- A "reasoning" that states a location first and then attaches grid numbers to
+  justify it is backwards. Read the lines first; let them determine the answer.
 
 Guidelines:
 - If dialogue is still animating or fading in, use "wait" until the text stabilises.

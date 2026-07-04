@@ -752,7 +752,11 @@ class Harness:
             else:
                 out_dir = Path(self.settings.logging.screenshot_dir).parent / "debug_overlays"
             os.makedirs(out_dir, exist_ok=True)
-            out_path = out_dir / f"debug_step_{self.step:04d}.png"
+            if self.run_id:
+                run_prefix = self.run_id[:5]
+                out_path = out_dir / f"{run_prefix}_debug_step_{self.step:04d}.png"
+            else:
+                out_path = out_dir / f"debug_step_{self.step:04d}.png"
             annotated.save(str(out_path), format="PNG")
             logger.info("📸 Debug overlay saved → %s", out_path)
 

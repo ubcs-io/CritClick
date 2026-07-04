@@ -667,7 +667,14 @@ class Capturer:
         label_bg = (0, 0, 0, 170)
 
         def _label(x: int, y: int, text: str, anchor: str) -> None:
-            """Draw *text* with a dark backing rect. *anchor* controls alignment."""
+            """Draw *text* with a dark backing rect. *anchor* controls alignment.
+
+            Horizontal: ``left`` / ``center`` / ``right``.
+            Vertical:   ``top``  / ``middle`` / ``bottom``.
+            Labels are anchored so the number straddles its own gridline
+            (centered across the line) rather than sitting offset to one side —
+            offset labels bias the reader toward the low-x / high-y corner.
+            """
             bbox = draw.textbbox((0, 0), text, font=font_small)
             tw = bbox[2] - bbox[0]
             th = bbox[3] - bbox[1]
@@ -677,23 +684,25 @@ class Capturer:
                 x -= tw // 2
             if "bottom" in anchor:
                 y -= th
+            elif "middle" in anchor:
+                y -= th // 2
             # Clamp so labels stay fully inside the image
             x = max(0, min(x, w - tw))
             y = max(0, min(y, h - th))
             draw.rectangle([x - 2, y - 1, x + tw + 2, y + th + 1], fill=label_bg)
             draw.text((x, y), text, fill=label_color, font=font_small)
 
-        # Vertical lines + x labels (top and bottom)
+        # Vertical lines + x labels centered on the line (top and bottom edges)
         for gx in range(0, w, spacing):
             draw.line([(gx, 0), (gx, h)], fill=line_color, width=1)
-            _label(gx, 2, str(gx), "left-top")
-            _label(gx, h - 2, str(gx), "left-bottom")
+            _label(gx, 1, str(gx), "center-top")
+            _label(gx, h - 1, str(gx), "center-bottom")
 
-        # Horizontal lines + y labels (left and right)
+        # Horizontal lines + y labels centered on the line (left and right edges)
         for gy in range(0, h, spacing):
             draw.line([(0, gy), (w, gy)], fill=line_color, width=1)
-            _label(2, gy, str(gy), "left-top")
-            _label(w - 2, gy, str(gy), "right-top")
+            _label(1, gy, str(gy), "left-middle")
+            _label(w - 1, gy, str(gy), "right-middle")
 
         return Image.alpha_composite(base, overlay)
 
