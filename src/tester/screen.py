@@ -144,15 +144,20 @@ class Capturer:
                 )
                 return correction
 
-        # Cross-platform heuristic: compare physical capture size to
-        # pyautogui's reported screen size.
+        # Cross-platform heuristic: compare the *physical-pixel* capture
+        # size (mss when available, otherwise pyautogui) against
+        # pyautogui's reported logical screen size.  On a Retina /
+        # HiDPI display the physical capture will be 2× (or 3×) the
+        # logical dimensions, giving us the correct coordinate multiplier.
         try:
             import pyautogui
 
-            pil_img = self._capture_via_pyautogui()
             logical_w, logical_h = pyautogui.size()
-            phys_w, phys_h = pil_img.size
-            if phys_w > 0 and phys_h > 0:
+            # Use the actual full-screen capture path (mss if available)
+            # so we get physical pixels, not logical points.
+            phys_img = self._capture_full_screen()
+            phys_w, phys_h = phys_img.size
+            if phys_w > 0 and phys_h > 0 and logical_w > 0 and logical_h > 0:
                 scale_w = logical_w / phys_w
                 scale_h = logical_h / phys_h
                 avg = (scale_w + scale_h) / 2.0
