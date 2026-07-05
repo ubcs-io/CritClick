@@ -45,10 +45,11 @@ class TestUserPrompt:
 
 
 class TestRecapPrompts:
-    def test_recap_system_prompt_includes_complaint_guidance(self):
+    def test_recap_system_prompt_includes_next_action_guidance(self):
         prompt = make_recap_system_prompt()
-        assert "complaint" in prompt.lower()
-        assert "roadblock" in prompt.lower()
+        assert "next action" in prompt.lower()
+        assert "next_action" in prompt
+        assert "related_steps" in prompt
 
     def test_recap_system_prompt_custom_override(self):
         custom = "Summarize this run."

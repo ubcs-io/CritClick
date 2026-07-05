@@ -3,7 +3,14 @@
 import pytest
 from pydantic import ValidationError
 
-from tester.models import ActionResponse, ActionType, LogEntry, RecapReport
+from tester.models import (
+    ActionResponse,
+    ActionType,
+    LogEntry,
+    NextActionReport,
+    NextActionStatus,
+    RecapReport,
+)
 
 
 class TestActionType:
@@ -127,16 +134,39 @@ class TestLogEntry:
             )
 
 
-class TestRecapReport:
-    def test_valid_recap(self):
-        recap = RecapReport(key_complaint="The game got stuck on a dialogue screen and never progressed.")
-        assert recap.key_complaint == "The game got stuck on a dialogue screen and never progressed."
+class TestNextActionReport:
+    def test_valid_report(self):
+        report = NextActionReport(
+            next_action="Investigate game/script.rpy — the game crashed at step 7.",
+            summary="The game process died unexpectedly at step 7.",
+            related_steps=[7],
+            status=NextActionStatus.GAME_DIED,
+            severity="error",
+        )
+        assert report.related_steps == [7]
+        assert report.status == NextActionStatus.GAME_DIED
 
-    def test_model_dump(self):
-        recap = RecapReport(key_complaint="No issues detected.")
-        d = recap.model_dump()
-        assert d == {"key_complaint": "No issues detected."}
+    def test_defaults(self):
+        report = NextActionReport(next_action="No action needed.")
+        assert report.summary == ""
+        assert report.error_text is None
+        assert report.related_steps == []
+        assert report.status == NextActionStatus.UNKNOWN
+        assert report.severity == "info"
 
-    def test_missing_key_complaint(self):
+    def test_missing_next_action(self):
         with pytest.raises(ValidationError):
-            RecapReport()
+            NextActionReport()
+
+    def test_key_complaint_back_compat(self):
+        # key_complaint falls back to summary, then next_action.
+        report = NextActionReport(next_action="Do X.", summary="Y happened.")
+        assert report.key_complaint == "Y happened."
+        report_no_summary = NextActionReport(next_action="Do X.")
+        assert report_no_summary.key_complaint == "Do X."
+
+    def test_recap_report_is_alias(self):
+        # RecapReport remains importable as a NextActionReport subclass.
+        assert issubclass(RecapReport, NextActionReport)
+        report = RecapReport(next_action="Do X.")
+        assert isinstance(report, NextActionReport)

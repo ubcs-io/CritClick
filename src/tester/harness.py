@@ -8,7 +8,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
+import traceback
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -19,7 +21,13 @@ from PIL import Image
 from .client import LLMClient
 from .config import Settings
 from .launcher import Launcher, capture_git_info
-from .models import ActionResponse, CalibrationResponse, LogEntry, RecapReport
+from .models import (
+    ActionResponse,
+    CalibrationResponse,
+    LogEntry,
+    NextActionReport,
+    NextActionStatus,
+)
 from .prompts import (
     make_calibration_system_prompt,
     make_calibration_user_prompt,
@@ -109,6 +117,15 @@ class Harness:
         # Captured at run start, written into the manifest
         self._git_info: dict | None = None
         self._exit_code: int | None = None
+
+        # Error context captured during the run, used to build the next-action
+        # takeaway (game engine tracebacks, harness crash tracebacks, and any
+        # source file / excerpt extracted from them).
+        self._game_stdout_tail: str | None = None
+        self._game_stderr_tail: str | None = None
+        self._crash_traceback: str | None = None
+        self._error_source_file: str | None = None
+        self._error_excerpt: str | None = None
 
         # Apply namespacing to settings in-place before setting up output.
         if run_id:
@@ -369,12 +386,21 @@ class Harness:
             logger.exception(f"💥 Harness crashed: {exc}")
             self.completion_reason = f"crashed: {exc}"
             exit_code = EXIT_RUNTIME_ERROR
+            # Preserve the traceback so the next-action takeaway can quote the
+            # real error and any source file it names. Not calling
+            # _log_game_output here: the game may still be alive and
+            # communicate() would block.
+            self._crash_traceback = traceback.format_exc()
+            self._error_source_file, self._error_excerpt = self._extract_error_source(
+                self._crash_traceback
+            )
         finally:
             self.stop()
             self._exit_code = exit_code
-            self._log_summary()
-            recap = self._run_recap()
-            self._write_manifest(recap=recap)
+            report = self._build_next_action()
+            self._log_summary(report)
+            self._write_next_action(report)
+            self._write_manifest(next_action=report)
 
         return exit_code
 
@@ -402,9 +428,10 @@ class Harness:
             except Exception:
                 stdout_text = str(stdout)
             if stdout_text.strip():
+                self._game_stdout_tail = stdout_text[-4000:]
                 logger.info(
                     "📤 Game stdout:\n%s",
-                    stdout_text[-4000:],
+                    self._game_stdout_tail,
                 )
         if stderr:
             try:
@@ -412,10 +439,49 @@ class Harness:
             except Exception:
                 stderr_text = str(stderr)
             if stderr_text.strip():
+                self._game_stderr_tail = stderr_text[-4000:]
                 logger.info(
                     "📥 Game stderr:\n%s",
-                    stderr_text[-4000:],
+                    self._game_stderr_tail,
                 )
+                # A game-engine traceback is the one place a specific source
+                # file surfaces — extract it for the next-action takeaway.
+                self._error_source_file, self._error_excerpt = self._extract_error_source(
+                    stderr_text
+                )
+
+    # Matches file references in engine/interpreter tracebacks, most-specific first:
+    #   Python/Ren'Py:  File "game/script.rpy", line 123, in foo
+    #   Godot:          res://scene.gd:45  (also at: ... (res://foo.gd:12))
+    _FILE_FRAME_RE = re.compile(r'File "([^"]+)", line (\d+)')
+    _GODOT_FRAME_RE = re.compile(r'(res://[^\s:"\')]+\.[A-Za-z0-9]+):(\d+)')
+
+    def _extract_error_source(self, text: str | None) -> tuple[str | None, str | None]:
+        """Extract the most relevant source file and error excerpt from a traceback.
+
+        Prefers the *last* file frame — the one closest to where the failure
+        actually occurred — and keeps the trailing lines as the excerpt.
+
+        Returns:
+            ``(source_file, excerpt)``; either element may be ``None``.
+        """
+        if not text or not text.strip():
+            return None, None
+
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        excerpt = "\n".join(lines[-15:]) if lines else None
+
+        source_file: str | None = None
+        # Last match wins (closest to the failure). Check both conventions.
+        py_matches = self._FILE_FRAME_RE.findall(text)
+        godot_matches = self._GODOT_FRAME_RE.findall(text)
+        if py_matches:
+            source_file = py_matches[-1][0]
+        elif godot_matches:
+            file_path, line_no = godot_matches[-1]
+            source_file = f"{file_path}:{line_no}"
+
+        return source_file, excerpt
 
     # ------------------------------------------------------------------
     # Safety
@@ -890,8 +956,13 @@ class Harness:
         except Exception as exc:
             logger.warning("⚠️  Failed to save debug overlay for step %d: %s", self.step, exc)
 
-    def _log_summary(self) -> None:
-        """Log a run summary at the end of the playthrough."""
+    def _log_summary(self, report: dict | None = None) -> None:
+        """Log a run summary at the end of the playthrough.
+
+        Args:
+            report: The next-action report dict, rendered into the summary and
+                echoed to stdout so it is the single salient takeaway.
+        """
         duration = time.time() - self.start_time if self.start_time else 0
         actions_str = ", ".join(
             f"{k}={v}" for k, v in sorted(self.action_counts.items())
@@ -904,13 +975,32 @@ class Harness:
         logger.info("  Duration        : %.1fs", duration)
         logger.info("  Actions         : %s", actions_str)
         logger.info("  Log file        : %s", self.settings.logging.log_file)
+        if report:
+            related = report.get("related_steps") or []
+            related_str = f" (step {', '.join(map(str, related))})" if related else ""
+            logger.info("  Next action     : %s%s", report.get("next_action", ""), related_str)
         logger.info("=" * 60)
+
+        if report:
+            self._print_next_action(report)
+
+    def _print_next_action(self, report: dict) -> None:
+        """Echo the single salient takeaway to stdout as the final block."""
+        related = report.get("related_steps") or []
+        related_str = f"  (step {', '.join(map(str, related))})" if related else ""
+        print("\n" + "=" * 60)
+        print(f"➡️  NEXT ACTION:{related_str}")
+        print(f"   {(report.get('next_action') or '').strip()}")
+        src = report.get("error_source_file")
+        if src:
+            print(f"   File: {src}")
+        print("=" * 60)
 
     # ------------------------------------------------------------------
     # Run manifest
     # ------------------------------------------------------------------
 
-    def _write_manifest(self, recap: dict | None = None) -> None:
+    def _write_manifest(self, next_action: dict | None = None) -> None:
         """Write a ``run_manifest.json`` describing this run.
 
         The manifest is the canonical entry point for the ingestion system:
@@ -919,8 +1009,9 @@ class Harness:
         auto-generated).
 
         Args:
-            recap: Optional recap report dict (e.g. ``{"key_complaint": "..."}``)
-                   to embed in the manifest.
+            next_action: The next-action report dict to embed. Mirrored into the
+                manifest so the ingestion system reads the same takeaway shown in
+                ``NEXT_ACTION.md`` and on stdout.
         """
         from . import __version__  # local import to avoid circular at module load
 
@@ -952,8 +1043,13 @@ class Harness:
             "tester_version": __version__,
         }
 
-        if recap:
-            manifest["recap"] = recap
+        if next_action:
+            manifest["next_action"] = next_action
+            # Back-compat: older readers expect a recap with key_complaint.
+            manifest["recap"] = {
+                "key_complaint": next_action.get("summary")
+                or next_action.get("next_action", "")
+            }
 
         run_dir = self.runs_dir / self.run_id
         os.makedirs(run_dir, exist_ok=True)
@@ -968,18 +1064,163 @@ class Harness:
             logger.warning(f"⚠️  Failed to write run manifest: {exc}")
 
     # ------------------------------------------------------------------
-    # Run recap
+    # Next-action takeaway
     # ------------------------------------------------------------------
 
-    def _run_recap(self) -> dict | None:
-        """Send all step logs to the LLM for a post-run recap.
+    def _build_next_action(self) -> dict:
+        """Build the single 'next key action' takeaway for this run.
 
-        Reads back the JSONL log file, formats a recap prompt, and calls the
-        LLM to extract the key complaint from the playthrough.
+        Hybrid strategy:
+          * Hard errors (game death, harness crash, config/runtime error) are
+            summarised deterministically from the concrete error text captured
+            during the run — no LLM call, so the case that matters most never
+            depends on the LLM succeeding.
+          * Soft/gameplay outcomes (completed, max-steps, stuck, interrupted)
+            are summarised by an LLM recap over the playthrough log.
+
+        Always returns a serialisable dict (never ``None``).
+        """
+        # Hard-error branch first, so a zero-step config error still produces a
+        # meaningful takeaway before the "no steps" short-circuit below.
+        hard = self._hard_error_action()
+        if hard is not None:
+            logger.info("📋 Next action | %s", hard["next_action"])
+            return hard
+
+        report = self._soft_action()
+        logger.info("📋 Next action | %s", report["next_action"])
+        return report
+
+    def _hard_error_action(self) -> dict | None:
+        """Deterministic takeaway for hard errors, or ``None`` if not one."""
+        reason = self.completion_reason or ""
+        is_game_died = reason == "game_died"
+        is_crash = reason.startswith("crashed:")
+        is_config = self._exit_code == EXIT_CONFIG_ERROR
+        is_runtime = self._exit_code == EXIT_RUNTIME_ERROR
+
+        if not (is_game_died or is_crash or is_config or is_runtime):
+            return None
+
+        error_text = self._error_excerpt or self._crash_traceback or self._game_stderr_tail
+        source = self._error_source_file
+        related = [self.step] if self.step else []
+        step_phrase = f" at step {self.step}" if self.step else ""
+
+        # Headline = the exception/message line (last non-empty line of a
+        # traceback), which is the most informative single line.
+        headline = ""
+        if error_text:
+            non_empty = [ln.strip() for ln in error_text.splitlines() if ln.strip()]
+            if non_empty:
+                headline = non_empty[-1]
+
+        if is_game_died:
+            status = NextActionStatus.GAME_DIED
+            how = f"The game process died unexpectedly{step_phrase}."
+        elif is_crash:
+            status = NextActionStatus.CRASHED
+            how = f"The harness crashed{step_phrase}."
+        elif is_config:
+            status = NextActionStatus.CONFIG_ERROR
+            how = "The run failed during configuration/startup before testing could begin."
+        else:
+            status = NextActionStatus.CRASHED
+            how = f"The run ended with a runtime error{step_phrase}."
+
+        if source:
+            next_action = f"Investigate {source}{step_phrase}"
+            next_action += f" — {headline}" if headline else f" — {how}"
+        elif headline:
+            next_action = f"Investigate the failure{step_phrase}: {headline}"
+        else:
+            next_action = f"Investigate the failure{step_phrase} ({reason or self._exit_code})."
+
+        summary_parts = [how]
+        if source:
+            summary_parts.append(f"Error references {source}.")
+        if headline:
+            summary_parts.append(f"Error: {headline}")
+        summary = " ".join(summary_parts)
+
+        return NextActionReport(
+            next_action=next_action,
+            summary=summary,
+            error_text=error_text,
+            error_source_file=source,
+            related_steps=related,
+            status=status,
+            severity="error",
+        ).model_dump(mode="json")
+
+    def _soft_action(self) -> dict:
+        """LLM-driven takeaway for soft/gameplay outcomes, with a fallback."""
+        status, severity = self._classify_soft_outcome()
+
+        recap = self._llm_recap()
+        if recap is not None:
+            # Status/severity are decided deterministically here, not by the LLM.
+            recap["status"] = status.value
+            recap["severity"] = severity
+            # Surface any step-level error text the LLM wasn't given/didn't cite.
+            if self._error_source_file and not recap.get("error_source_file"):
+                recap["error_source_file"] = self._error_source_file
+            if self._error_excerpt and not recap.get("error_text"):
+                recap["error_text"] = self._error_excerpt
+            return recap
+
+        return self._fallback_action(status, severity)
+
+    def _classify_soft_outcome(self) -> tuple[NextActionStatus, str]:
+        """Map a soft completion reason to a (status, severity) pair."""
+        reason = self.completion_reason or ""
+        stuck = self.stuck_counter >= self.settings.harness.stuck_threshold
+        if reason == "completed":
+            return NextActionStatus.COMPLETED, "info"
+        if reason == "interrupted":
+            return NextActionStatus.INTERRUPTED, "info"
+        if reason == "max_steps_reached":
+            return NextActionStatus.MAX_STEPS, "warning"
+        if stuck:
+            return NextActionStatus.STUCK, "warning"
+        return NextActionStatus.UNKNOWN, "info"
+
+    def _fallback_action(self, status: NextActionStatus, severity: str) -> dict:
+        """Minimal deterministic takeaway when the LLM recap is unavailable."""
+        reason = self.completion_reason or "unknown"
+        related = [self.step] if self.step else []
+        if status == NextActionStatus.COMPLETED:
+            next_action = "No action needed — the playthrough completed naturally."
+        elif status == NextActionStatus.MAX_STEPS:
+            next_action = (
+                f"Review the playthrough — it ran to the step limit ({self.step}) "
+                "without reaching a natural end."
+            )
+        elif status == NextActionStatus.STUCK:
+            next_action = (
+                f"Review around step {self.step} — the run appears stuck repeating "
+                "the same action."
+            )
+        elif status == NextActionStatus.INTERRUPTED:
+            next_action = "Re-run — the playthrough was interrupted before finishing."
+        else:
+            next_action = f"Review the playthrough log — run ended: {reason}."
+        return NextActionReport(
+            next_action=next_action,
+            summary=f"Run ended ({reason}) after {self.step} step(s).",
+            error_text=self._error_excerpt,
+            error_source_file=self._error_source_file,
+            related_steps=related,
+            status=status,
+            severity=severity,
+        ).model_dump(mode="json")
+
+    def _llm_recap(self) -> dict | None:
+        """Send the playthrough log to the LLM for a structured recap.
 
         Returns:
-            A dict with a ``"key_complaint"`` field, or ``None`` if the recap
-            could not be generated (missing log file, LLM error, etc.).
+            A validated :class:`NextActionReport` dict, or ``None`` if the recap
+            could not be generated (missing/empty log, LLM error, invalid JSON).
         """
         log_file = self.settings.logging.log_file
         if not os.path.isfile(log_file):
@@ -1037,6 +1278,7 @@ class Harness:
             duration=duration,
             action_counts=actions_str,
             step_log=step_log,
+            error_context=self._error_excerpt or "",
         )
 
         # Call LLM — recap is text-only, so send a minimal 1×1 PNG placeholder
@@ -1051,11 +1293,48 @@ class Harness:
             return None
 
         try:
-            recap = RecapReport.model_validate(raw)
+            report = NextActionReport.model_validate(raw)
         except Exception as exc:
             logger.warning("📋 Recap response validation failed: %s", exc)
             return None
 
-        recap_dict = recap.model_dump()
-        logger.info("📋 Run recap | key_complaint: %s", recap_dict["key_complaint"])
-        return recap_dict
+        return report.model_dump(mode="json")
+
+    def _write_next_action(self, report: dict) -> None:
+        """Write ``NEXT_ACTION.md`` — the primary human-facing takeaway file.
+
+        Rendered from the same report dict embedded in the manifest and printed
+        to stdout, so all three locations agree. Failure is non-fatal.
+        """
+        lines = [f"# Next Action\n", f"{report.get('next_action', '').strip()}\n"]
+
+        summary = (report.get("summary") or "").strip()
+        if summary:
+            lines.append("## Summary\n")
+            lines.append(f"{summary}\n")
+
+        related = report.get("related_steps") or []
+        if related:
+            lines.append("## Related steps\n")
+            lines.append(", ".join(f"step {s}" for s in related) + "\n")
+
+        error_text = report.get("error_text")
+        source = report.get("error_source_file")
+        if error_text or source:
+            lines.append("## Error\n")
+            if source:
+                lines.append(f"**Source file:** `{source}`\n")
+            if error_text:
+                lines.append("```\n" + error_text.rstrip() + "\n```\n")
+
+        meta = f"_status: {report.get('status', 'unknown')} · severity: {report.get('severity', 'info')}_\n"
+        lines.append(meta)
+
+        run_dir = self.runs_dir / self.run_id
+        os.makedirs(run_dir, exist_ok=True)
+        path = run_dir / "NEXT_ACTION.md"
+        try:
+            path.write_text("\n".join(lines), encoding="utf-8")
+            logger.info("📝 Wrote next action: %s", path)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(f"⚠️  Failed to write NEXT_ACTION.md: {exc}")

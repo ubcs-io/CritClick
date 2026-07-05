@@ -105,27 +105,33 @@ def make_user_prompt(
 # Recap prompt — runs after playthrough to extract key complaint
 # ---------------------------------------------------------------------------
 
-RECAP_SYSTEM_PROMPT = """You are an AI game testing analyst. You will receive a complete step-by-step log of a game playthrough. Your task is to identify the single most important complaint, roadblock, or issue that occurred during the run.
+RECAP_SYSTEM_PROMPT = """You are an AI game testing analyst. You will receive a complete step-by-step log of a game playthrough. Your task is to distill the single most important NEXT ACTION a developer should take, based on what happened during the run.
 
 Guidelines:
 - Look for errors, stuck states, repeated failed actions, or unnatural delays.
 - If the run went smoothly, identify what stood out as notable (e.g. "dialogue flowed well", "no interactive elements were missed").
-- Your response must be a concise, single-sentence summary of the key complaint.
-- Output ONLY valid JSON matching the expected schema."""
+- Reference the specific step number(s) from the log where the issue was encountered.
+- If error text is provided, quote the salient part and attribute any file names it mentions.
+- Output ONLY valid JSON matching the expected schema, with fields:
+  - "next_action": the single most important thing to do next, phrased imperatively.
+  - "summary": a concise description of the problem/outcome and how it was encountered.
+  - "related_steps": a list of the step numbers (integers) the issue spans.
+  - "error_text": the salient error text if any was provided, else null.
+  - "error_source_file": a source file named by the error, if any, else null."""
 
 
-RECAP_USER_PROMPT_TEMPLATE = """Review the following playthrough log and identify the single most significant complaint, roadblock, or issue.
+RECAP_USER_PROMPT_TEMPLATE = """Review the following playthrough log and determine the single most important next action.
 
 Run summary:
 - Steps completed: {steps_completed}
 - Completion reason: {completion_reason}
 - Duration: {duration:.1f}s
 - Action counts: {action_counts}
-
+{error_context}
 Step-by-step log:
 {step_log}
 
-What was the key complaint? Output ONLY valid JSON."""
+What is the single most important next action? Reference the relevant step number(s). Output ONLY valid JSON."""
 
 
 # ---------------------------------------------------------------------------
@@ -167,12 +173,21 @@ def make_recap_user_prompt(
     duration: float,
     action_counts: str,
     step_log: str,
+    error_context: str = "",
 ) -> str:
-    """Return the recap user prompt filled with run metadata and step log."""
+    """Return the recap user prompt filled with run metadata and step log.
+
+    Args:
+        error_context: Optional captured error text (game stderr / traceback)
+            to give the model concrete failure detail. Rendered as its own block
+            when non-empty; omitted otherwise.
+    """
+    error_block = f"\nCaptured error text:\n{error_context.strip()}\n" if error_context.strip() else ""
     return RECAP_USER_PROMPT_TEMPLATE.format(
         steps_completed=steps_completed,
         completion_reason=completion_reason,
         duration=duration,
         action_counts=action_counts,
         step_log=step_log,
+        error_context=error_block,
     )

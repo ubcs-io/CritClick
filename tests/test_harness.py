@@ -242,7 +242,7 @@ class TestRunSummary:
 
 
 class TestRunRecap:
-    """Tests for the _run_recap() post-run LLM feedback feature."""
+    """Tests for the _llm_recap() post-run LLM feedback feature."""
 
     @pytest.fixture
     def recap_harness(self, sample_settings):
@@ -314,25 +314,27 @@ class TestRunRecap:
         harness, _tmpdir = recap_harness
         mock_client: MagicMock = harness.llm  # type: ignore[assignment]
         mock_client.analyze.return_value = {
-            "key_complaint": "The game had no save button in the options menu."
+            "next_action": "Add a save button to the options menu.",
+            "summary": "The game had no save button in the options menu.",
+            "related_steps": [2],
         }
 
-        result = harness._run_recap()
+        result = harness._llm_recap()
         assert result is not None
-        assert result["key_complaint"] == "The game had no save button in the options menu."
+        assert result["next_action"] == "Add a save button to the options menu."
+        assert result["related_steps"] == [2]
 
     def test_recap_calls_llm_with_recap_prompt(self, recap_harness):
         harness, _tmpdir = recap_harness
         mock_client: MagicMock = harness.llm  # type: ignore[assignment]
         mock_client.analyze.return_value = {
-            "key_complaint": "Everything worked fine."
+            "next_action": "No action needed — everything worked fine.",
         }
 
-        harness._run_recap()
+        harness._llm_recap()
         mock_client.analyze.assert_called_once()
         _, system_prompt, user_prompt = mock_client.analyze.call_args[0]
-        assert "complaint" in system_prompt.lower()
-        assert "roadblock" in system_prompt.lower()
+        assert "next action" in system_prompt.lower()
         assert "Step 1" in user_prompt
         assert "Step 2" in user_prompt
         assert "Step 3" in user_prompt
@@ -344,7 +346,7 @@ class TestRunRecap:
         mock_client: MagicMock = harness.llm  # type: ignore[assignment]
         mock_client.analyze.side_effect = RuntimeError("API down")
 
-        result = harness._run_recap()
+        result = harness._llm_recap()
         assert result is None
 
     def test_recap_returns_none_on_validation_error(self, recap_harness):
@@ -352,7 +354,7 @@ class TestRunRecap:
         mock_client: MagicMock = harness.llm  # type: ignore[assignment]
         mock_client.analyze.return_value = {"wrong_field": "bad"}
 
-        result = harness._run_recap()
+        result = harness._llm_recap()
         assert result is None
 
     def test_recap_skipped_when_no_steps(self, sample_settings):
@@ -365,7 +367,7 @@ class TestRunRecap:
 
             harness = Harness(sample_settings, launcher, client, dry_run=True)
             harness.step = 0
-            result = harness._run_recap()
+            result = harness._llm_recap()
             assert result is None
 
     def test_recap_skipped_when_no_log_file(self, sample_settings):
@@ -375,7 +377,7 @@ class TestRunRecap:
         harness = Harness(sample_settings, launcher, client, dry_run=True)
         harness.settings.logging.log_file = "/nonexistent/path/log.jsonl"
         harness.step = 5
-        result = harness._run_recap()
+        result = harness._llm_recap()
         assert result is None
 
     def test_recap_skipped_when_empty_log_file(self, sample_settings):
@@ -390,8 +392,67 @@ class TestRunRecap:
 
             harness = Harness(sample_settings, launcher, client, dry_run=True)
             harness.step = 3
-            result = harness._run_recap()
+            result = harness._llm_recap()
             assert result is None
+
+
+class TestBuildNextAction:
+    """Tests for the hybrid _build_next_action() takeaway generator."""
+
+    def _harness(self, sample_settings):
+        return Harness(sample_settings, MagicMock(), MagicMock(spec=LLMClient), dry_run=True)
+
+    def test_game_death_is_deterministic_and_names_file(self, sample_settings):
+        harness = self._harness(sample_settings)
+        harness.step = 5
+        harness.completion_reason = "game_died"
+        harness._exit_code = 3
+        # Simulate a Ren'Py traceback captured from the game's stderr.
+        stderr = (
+            'Traceback (most recent call last):\n'
+            '  File "game/script.rpy", line 42, in script\n'
+            'Exception: image not found: bg office\n'
+        )
+        harness._error_source_file, harness._error_excerpt = harness._extract_error_source(stderr)
+
+        report = harness._build_next_action()
+
+        # No LLM call on the hard-error path.
+        harness.llm.analyze.assert_not_called()
+        assert report["status"] == "game_died"
+        assert report["error_source_file"] == "game/script.rpy"
+        assert report["related_steps"] == [5]
+        assert "game/script.rpy" in report["next_action"]
+        assert "image not found" in report["error_text"]
+
+    def test_crash_captures_error_text(self, sample_settings):
+        harness = self._harness(sample_settings)
+        harness.step = 8
+        harness.completion_reason = "crashed: boom"
+        harness._exit_code = 2
+        harness._crash_traceback = (
+            'Traceback (most recent call last):\n'
+            '  File "src/tester/harness.py", line 500, in analyze_and_act\n'
+            'RuntimeError: boom\n'
+        )
+        harness._error_source_file, harness._error_excerpt = harness._extract_error_source(
+            harness._crash_traceback
+        )
+
+        report = harness._build_next_action()
+        assert report["status"] == "crashed"
+        assert report["related_steps"] == [8]
+        assert "RuntimeError: boom" in report["error_text"]
+
+    def test_soft_completion_uses_fallback_when_llm_unavailable(self, sample_settings):
+        harness = self._harness(sample_settings)
+        harness.step = 3
+        harness.completion_reason = "completed"
+        harness.settings.logging.log_file = "/nonexistent/path/log.jsonl"
+
+        report = harness._build_next_action()
+        assert report["status"] == "completed"
+        assert report["next_action"]  # non-empty deterministic fallback
 
 
 class TestCoordinateGridApplication:
