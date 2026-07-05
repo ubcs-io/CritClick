@@ -107,6 +107,9 @@ class OpenAIClient(LLMClient):
         retry_delay: float = 2.0,
         debug_llm: bool = False,
         reasoning_max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+        timeout: float | None = None,
+        extra_body: dict | None = None,
     ):
         if api_key is None:
             logger.info("No API key provided — connecting without authentication.")
@@ -114,7 +117,10 @@ class OpenAIClient(LLMClient):
         self.model = model
         self.max_tokens = max_tokens
         self.reasoning_max_tokens = reasoning_max_tokens
+        self.reasoning_effort = reasoning_effort
         self.temperature = temperature
+        self.timeout = timeout
+        self.extra_body = extra_body
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.debug_llm = debug_llm
@@ -123,7 +129,10 @@ class OpenAIClient(LLMClient):
 
         from openai import OpenAI
 
-        self._client = OpenAI(api_key=api_key or "", base_url=self.api_base)
+        client_kwargs: dict = {"api_key": api_key or "", "base_url": self.api_base}
+        if timeout is not None:
+            client_kwargs["timeout"] = timeout
+        self._client = OpenAI(**client_kwargs)
 
     def locate_markers(self, image_b64: str, system_prompt: str, user_prompt: str) -> dict:
         """Send the calibration probe image and return located markers.
@@ -192,9 +201,9 @@ class OpenAIClient(LLMClient):
         last_exc: Exception | None = None
         for attempt in range(1, self.max_retries + 2):  # +1 for initial attempt
             try:
-                response = self._client.chat.completions.create(
-                    model=self.model,
-                    messages=[
+                create_kwargs: dict = {
+                    "model": self.model,
+                    "messages": [
                         {"role": "system", "content": system_prompt},
                         {
                             "role": "user",
@@ -210,10 +219,16 @@ class OpenAIClient(LLMClient):
                             ],
                         },
                     ],
-                    max_tokens=effective_max_tokens,
-                    response_format=response_format,
-                    temperature=self.temperature,
-                )
+                    "max_tokens": effective_max_tokens,
+                    "response_format": response_format,
+                    "temperature": self.temperature,
+                }
+                if self.reasoning_effort is not None:
+                    create_kwargs["reasoning_effort"] = self.reasoning_effort
+                if self.extra_body is not None:
+                    create_kwargs["extra_body"] = self.extra_body
+
+                response = self._client.chat.completions.create(**create_kwargs)
             except Exception as exc:
                 last_exc = exc
                 logger.warning(
@@ -344,8 +359,8 @@ class OpenAIClient(LLMClient):
         import re
 
         return re.sub(
-            r"Recent narrative context:\n.*?\n\nIdentify interactive elements",
-            "Recent narrative context:\n[...]\n\nIdentify interactive elements",
+            r"Recent narrative context:\n.*?\n\nFollow the WORKFLOW",
+            "Recent narrative context:\n[...]\n\nFollow the WORKFLOW",
             user_prompt,
             flags=re.DOTALL,
         )

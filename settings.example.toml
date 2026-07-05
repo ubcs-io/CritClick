@@ -12,14 +12,26 @@ api_base = "https://api.openai.com/v1"
 api_key = "sk-..."
 # Vision-capable model to use
 model = "gpt-4o"
-# Max tokens for LLM response
+# Max tokens for LLM completion. For reasoning models (o1, o3, deepseek-r1) this
+# is the TOTAL budget for thinking + output combined. Keep low to cap thinking
+# time; raise only if the model consistently returns empty content.
 max_tokens = 600
 # Only for reasoning/"thinking" models: larger budget used to recover when the
 # model spends all of max_tokens on thinking and returns empty content
 # (finish_reason="length"). Leave unset for standard models like gpt-4o.
 # reasoning_max_tokens = 4096
+# Thinking effort for o-series reasoning models (o1, o3): "low", "medium", or "high".
+# "low" dramatically reduces thinking tokens for simple UI/click tasks.
+# Leave unset for non-o-series models; ignored by standard models like gpt-4o.
+# reasoning_effort = "low"
 # Low temperature for deterministic UI interactions
 temperature = 0.1
+# Per-request timeout in seconds. When set, calls exceeding this duration are
+# terminated and retried. Useful to cap runaway thinking on reasoning models.
+# timeout = 60.0
+# Additional parameters to pass directly in the API request body (model-specific
+# options not exposed as top-level config, e.g. vLLM thinking settings).
+# extra_body = { chat_template_kwargs = { thinking = false } }
 # Max retries for transient LLM failures (rate limits, timeouts)
 max_retries = 3
 # Base delay in seconds for exponential backoff between retries

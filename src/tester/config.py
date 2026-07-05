@@ -66,7 +66,15 @@ class LLMSettings(BaseModel):
         default="gpt-4o",
         description="Model identifier (e.g. 'gpt-4o', 'gpt-4o-mini', 'llava-v1.6-mistral-7b').",
     )
-    max_tokens: int = Field(default=600, ge=1, le=16384)
+    max_tokens: int = Field(
+        default=600, ge=1, le=16384,
+        description=(
+            "Max tokens for the completion. For reasoning models (o1, o3, "
+            "deepseek-r1) this is the TOTAL budget for thinking + output "
+            "combined. Set low (e.g. 600) to cap thinking time; raise only "
+            "if the model consistently returns empty content."
+        ),
+    )
     reasoning_max_tokens: int | None = Field(
         default=None, ge=1, le=16384,
         description=(
@@ -76,7 +84,32 @@ class LLMSettings(BaseModel):
             "unset for standard models."
         ),
     )
+    reasoning_effort: str | None = Field(
+        default=None,
+        description=(
+            "Thinking effort level for o-series reasoning models (o1, o3). "
+            "One of 'low', 'medium', 'high'. 'low' dramatically reduces thinking "
+            "token usage for simple UI/click tasks. Leave unset for non-o-series "
+            "models. Ignored by standard models like gpt-4o."
+        ),
+    )
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
+    timeout: float | None = Field(
+        default=None, ge=1.0,
+        description=(
+            "Per-request timeout in seconds. When set, a call that exceeds this "
+            "duration is terminated and retried. Useful to cap runaway thinking "
+            "on reasoning models. Leave unset for no timeout."
+        ),
+    )
+    extra_body: dict | None = Field(
+        default=None,
+        description=(
+            "Additional parameters to pass directly in the API request body. "
+            "Use this for model-specific options not exposed as top-level config "
+            "(e.g. vLLM 'thinking' settings: {'chat_template_kwargs': {'thinking': False}})."
+        ),
+    )
     max_retries: int = Field(
         default=3, ge=0,
         description="Maximum number of retries for transient LLM failures (rate limits, timeouts).",

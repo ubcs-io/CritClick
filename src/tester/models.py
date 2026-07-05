@@ -17,11 +17,35 @@ class ActionType(str, Enum):
     DONE = "done"
 
 
+class Candidate(BaseModel):
+    """One interactive element the model identified on screen, with its relevance."""
+
+    label: str = Field(
+        ..., description="Name or description of the element (e.g. 'Start button', 'Dialogue choice: Yes')."
+    )
+    bbox: list[float] = Field(
+        ..., description="Approximate bounding box [x1, y1, x2, y2] of this element in image pixels."
+    )
+    action: ActionType = Field(
+        ..., description="What action clicking/tapping this element would perform."
+    )
+    relevance: str = Field(
+        ..., description="Why this element matters to the current game state (e.g. 'primary forward path', 'secondary option', 'settings/navigation')."
+    )
+
+
 class ActionResponse(BaseModel):
     """Structured response expected from the vision LLM."""
 
     description: str = Field(
-        ..., description="Brief description of what's on screen."
+        ..., description="Brief description of what's on screen (1 sentence)."
+    )
+    candidates: list[Candidate] = Field(
+        default_factory=list,
+        description="Up to 3 interactive elements visible on screen. "
+        "List every clickable/tappable element you can identify, with approximate "
+        "bounding boxes. The chosen action should target one of these. "
+        "For non-click actions (wait/done/press/type), this may be empty.",
     )
     action: ActionType = Field(
         ...,
@@ -56,7 +80,9 @@ class ActionResponse(BaseModel):
     )
     reasoning: str = Field(
         ...,
-        description="Chain-of-thought explanation for why this action was chosen.",
+        max_length=300,
+        description="Brief explanation (max 300 chars) of which candidate was chosen and why. "
+        "Format: 'Selected [label] because [reason]. Alternatives were [alt1] ([reason not chosen]) and [alt2] ([reason not chosen]).'",
     )
     narrative: str = Field(
         ...,
