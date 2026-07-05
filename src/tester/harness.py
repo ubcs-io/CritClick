@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 
@@ -86,9 +86,11 @@ class Harness:
         # calibration is disabled or fails).
         self.capturer.set_coordinate_max(settings.harness.coordinate_max)
 
-        # Run namespacing — when run_id is set, outputs go under
-        # ``<runs_dir>/<run_id>/`` instead of the flat cwd paths.
-        # When None, behaviour is unchanged (backward compatible).
+        # Run namespacing — every run gets a unique ID so outputs are always
+        # isolated under ``<runs_dir>/<run_id>/``.  If the caller doesn't
+        # supply one, a default timestamp-based ID is generated.
+        if run_id is None:
+            run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S-%f")
         self.run_id = run_id
         self.runs_dir = Path(runs_dir)
 
@@ -805,11 +807,8 @@ class Harness:
         screenshot_path: str | None = None
 
         if log_settings.save_screenshots:
-            if self.run_id:
-                run_prefix = self.run_id[:5]
-                filename = f"{run_prefix}_step_{self.step:04d}.png"
-            else:
-                filename = f"step_{self.step:04d}.png"
+            run_prefix = self.run_id[:5]
+            filename = f"{run_prefix}_step_{self.step:04d}.png"
             screenshot_path = os.path.join(log_settings.screenshot_dir, filename)
             try:
                 img = self.capturer.capture_pil()
@@ -880,18 +879,11 @@ class Harness:
                 metadata=metadata,
             )
 
-            # Save — prefer the namespaced run directory when available,
-            # otherwise fall back to a sibling directory of the screenshots.
-            if self.run_id:
-                out_dir = self.runs_dir / self.run_id  # type: ignore[arg-type]
-            else:
-                out_dir = Path(self.settings.logging.screenshot_dir).parent / "debug_overlays"
+            # Save to the namespaced run directory.
+            out_dir = self.runs_dir / self.run_id  # type: ignore[arg-type]
             os.makedirs(out_dir, exist_ok=True)
-            if self.run_id:
-                run_prefix = self.run_id[:5]
-                out_path = out_dir / f"{run_prefix}_debug_step_{self.step:04d}.png"
-            else:
-                out_path = out_dir / f"debug_step_{self.step:04d}.png"
+            run_prefix = self.run_id[:5]
+            out_path = out_dir / f"{run_prefix}_debug_step_{self.step:04d}.png"
             annotated.save(str(out_path), format="PNG")
             logger.info("📸 Debug overlay saved → %s", out_path)
 
@@ -921,17 +913,15 @@ class Harness:
     def _write_manifest(self, recap: dict | None = None) -> None:
         """Write a ``run_manifest.json`` describing this run.
 
-        Only written when ``run_id`` is set (namespaced mode). The manifest is
-        the canonical entry point for the ingestion system: discover runs by
-        globbing ``runs/*/run_manifest.json``.
+        The manifest is the canonical entry point for the ingestion system:
+        discover runs by globbing ``runs/*/run_manifest.json``.  Every run
+        gets a manifest because ``run_id`` is always set (explicit or
+        auto-generated).
 
         Args:
             recap: Optional recap report dict (e.g. ``{"key_complaint": "..."}``)
                    to embed in the manifest.
         """
-        if not self.run_id:
-            return
-
         from . import __version__  # local import to avoid circular at module load
 
         duration = time.time() - self.start_time if self.start_time else 0

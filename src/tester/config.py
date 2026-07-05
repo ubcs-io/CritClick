@@ -67,6 +67,15 @@ class LLMSettings(BaseModel):
         description="Model identifier (e.g. 'gpt-4o', 'gpt-4o-mini', 'llava-v1.6-mistral-7b').",
     )
     max_tokens: int = Field(default=600, ge=1, le=16384)
+    reasoning_max_tokens: int | None = Field(
+        default=None, ge=1, le=16384,
+        description=(
+            "Larger completion budget used to recover when a reasoning/thinking "
+            "model exhausts max_tokens on its thinking and returns empty content "
+            "(finish_reason='length'). Only relevant for reasoning models; leave "
+            "unset for standard models."
+        ),
+    )
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     max_retries: int = Field(
         default=3, ge=0,

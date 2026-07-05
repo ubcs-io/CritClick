@@ -630,6 +630,7 @@ def main(argv: list[str] | None = None) -> None:
         api_key=api_key,
         model=settings.llm.model,
         max_tokens=settings.llm.max_tokens,
+        reasoning_max_tokens=settings.llm.reasoning_max_tokens,
         temperature=settings.llm.temperature,
         max_retries=settings.llm.max_retries,
         retry_delay=settings.llm.retry_delay,

@@ -106,12 +106,14 @@ class OpenAIClient(LLMClient):
         max_retries: int = 3,
         retry_delay: float = 2.0,
         debug_llm: bool = False,
+        reasoning_max_tokens: int | None = None,
     ):
         if api_key is None:
             logger.info("No API key provided — connecting without authentication.")
         self.api_base = api_base.rstrip("/")
         self.model = model
         self.max_tokens = max_tokens
+        self.reasoning_max_tokens = reasoning_max_tokens
         self.temperature = temperature
         self.max_retries = max_retries
         self.retry_delay = retry_delay
@@ -182,6 +184,11 @@ class OpenAIClient(LLMClient):
                 len(image_b64),
             )
 
+        # Effective completion budget for this request. Bumped to
+        # ``reasoning_max_tokens`` if a reasoning model exhausts the budget on
+        # thinking tokens and returns empty content (finish_reason="length").
+        effective_max_tokens = self.max_tokens
+
         last_exc: Exception | None = None
         for attempt in range(1, self.max_retries + 2):  # +1 for initial attempt
             try:
@@ -203,7 +210,7 @@ class OpenAIClient(LLMClient):
                             ],
                         },
                     ],
-                    max_tokens=self.max_tokens,
+                    max_tokens=effective_max_tokens,
                     response_format=response_format,
                     temperature=self.temperature,
                 )
@@ -220,22 +227,69 @@ class OpenAIClient(LLMClient):
                     continue
                 raise RuntimeError(f"LLM API call failed after {attempt} attempts: {exc}") from exc
 
-            raw = response.choices[0].message.content
+            choice = response.choices[0]
+            message = choice.message
+            raw = message.content
+            reasoning = self._extract_reasoning(message)
+            finish_reason = choice.finish_reason
 
             if self.debug_llm:
                 logger.info(
-                    "🔍 [DEBUG-LLM] --- Raw model response (%d chars) ---\n%s",
+                    "🔍 [DEBUG-LLM] --- Raw model response (%d chars, finish_reason=%s) ---\n%s",
                     len(raw) if raw else 0,
+                    finish_reason,
                     raw if raw else "(empty)",
                 )
+                if reasoning:
+                    logger.info(
+                        "🧠 [DEBUG-LLM] --- Reasoning trace (%d chars) ---\n%s",
+                        len(reasoning),
+                        reasoning,
+                    )
 
             if not raw:
-                last_exc = RuntimeError("LLM returned empty content.")
+                # An empty ``content`` on a reasoning model usually means the
+                # answer never made it out of the thinking channel — surface
+                # the reasoning + finish_reason so it isn't silently opaque.
+                reasoning_note = (
+                    f" | reasoning: {reasoning[:200]}…" if reasoning else ""
+                )
+                last_exc = RuntimeError(
+                    f"LLM returned empty content (finish_reason={finish_reason})."
+                )
                 logger.warning(
-                    "⚠️  LLM returned empty content on attempt %d/%d",
+                    "⚠️  LLM returned empty content on attempt %d/%d "
+                    "(finish_reason=%s)%s",
                     attempt,
                     self.max_retries + 1,
+                    finish_reason,
+                    reasoning_note,
                 )
+
+                # finish_reason="length" means the token budget was exhausted —
+                # very likely by reasoning tokens. Retrying with the same budget
+                # is futile; recover by bumping to reasoning_max_tokens if set.
+                if finish_reason == "length":
+                    if (
+                        self.reasoning_max_tokens is not None
+                        and self.reasoning_max_tokens > effective_max_tokens
+                    ):
+                        logger.warning(
+                            "⚠️  Token budget (%d) exhausted before content was "
+                            "produced (likely reasoning tokens) — retrying with "
+                            "reasoning_max_tokens=%d.",
+                            effective_max_tokens,
+                            self.reasoning_max_tokens,
+                        )
+                        effective_max_tokens = self.reasoning_max_tokens
+                        continue  # retry immediately with the larger budget
+                    raise RuntimeError(
+                        f"LLM exhausted its {effective_max_tokens}-token budget "
+                        f"before producing content (finish_reason=length) — likely "
+                        f"a reasoning model spending the budget on thinking. Raise "
+                        f"max_tokens or set reasoning_max_tokens."
+                    ) from last_exc
+
                 if attempt <= self.max_retries:
                     self._sleep_backoff(attempt)
                     continue
@@ -258,6 +312,25 @@ class OpenAIClient(LLMClient):
 
         # Should not reach here, but satisfy type checker
         raise RuntimeError(f"LLM analyze failed: {last_exc}")
+
+    @staticmethod
+    def _extract_reasoning(message) -> str | None:
+        """Pull a reasoning/thinking trace from non-standard message fields.
+
+        Reasoning models served over OpenAI-compatible endpoints return their
+        thinking *outside* ``message.content`` — commonly ``reasoning_content``
+        (DeepSeek, vLLM, SGLang) or ``reasoning`` (OpenRouter). The stock OpenAI
+        SDK doesn't model these fields, so they land in ``message.model_extra``.
+        Returns the first non-empty trace found, else ``None``.
+        """
+        extra = getattr(message, "model_extra", None) or {}
+        for attr in ("reasoning_content", "reasoning"):
+            val = getattr(message, attr, None)
+            if val is None:
+                val = extra.get(attr)
+            if isinstance(val, str) and val.strip():
+                return val
+        return None
 
     @staticmethod
     def _user_prompt_skeleton(user_prompt: str) -> str:

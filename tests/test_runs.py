@@ -31,12 +31,20 @@ class TestRunNamespace:
         assert sample_settings.logging.log_file == str(tmp_path / run_id / "playthrough_log.jsonl")
         assert sample_settings.logging.screenshot_dir == str(tmp_path / run_id / "screenshots")
 
-    def test_no_namespace_preserves_flat_layout(self, sample_settings):
+    def test_no_explicit_run_id_still_namespaces(self, sample_settings, tmp_path):
+        """When no run_id is provided, a timestamp-based default is auto-generated
+        and outputs are always namespaced under runs/<auto-id>/."""
         launcher = MagicMock()
         client = MagicMock(spec=LLMClient)
-        original_log = sample_settings.logging.log_file
-        Harness(sample_settings, launcher, client, dry_run=True)
-        assert sample_settings.logging.log_file == original_log
+        harness = Harness(
+            sample_settings, launcher, client,
+            dry_run=True,
+            runs_dir=tmp_path,
+        )
+        assert harness.run_id is not None
+        assert len(harness.run_id) > 10  # e.g. "20260704T181316-123456"
+        # Paths should be namespaced under runs/<auto-id>/
+        assert str(tmp_path / harness.run_id) in sample_settings.logging.log_file
 
     def test_namespace_creates_run_directory(self, sample_settings, tmp_path):
         run_id = "testrun"
@@ -64,13 +72,20 @@ class TestRunNamespace:
 # ---------------------------------------------------------------------------
 
 class TestRunManifest:
-    def test_manifest_not_written_without_run_id(self, sample_settings):
+    def test_manifest_always_written_with_auto_id(self, sample_settings, tmp_path):
+        """Since run_id is always auto-generated, a manifest is always written."""
         launcher = MagicMock()
         client = MagicMock(spec=LLMClient)
-        harness = Harness(sample_settings, launcher, client, dry_run=True)
-        # _write_manifest early-returns when run_id is None
+        harness = Harness(
+            sample_settings, launcher, client,
+            dry_run=True,
+            runs_dir=tmp_path,
+        )
+        harness._exit_code = EXIT_SUCCESS
+        harness.completion_reason = "completed"
         harness._write_manifest()
-        # No exception, no file — nothing to assert beyond no crash.
+        manifest_path = tmp_path / harness.run_id / "run_manifest.json"
+        assert manifest_path.is_file()
 
     def test_manifest_contains_required_fields(self, sample_settings, tmp_path):
         run_id = "manifesttest"

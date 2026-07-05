@@ -14,6 +14,10 @@ api_key = "sk-..."
 model = "gpt-4o"
 # Max tokens for LLM response
 max_tokens = 600
+# Only for reasoning/"thinking" models: larger budget used to recover when the
+# model spends all of max_tokens on thinking and returns empty content
+# (finish_reason="length"). Leave unset for standard models like gpt-4o.
+# reasoning_max_tokens = 4096
 # Low temperature for deterministic UI interactions
 temperature = 0.1
 # Max retries for transient LLM failures (rate limits, timeouts)
