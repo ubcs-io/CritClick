@@ -72,6 +72,10 @@ playthrough_log.jsonl
 playthrough_log.md
 screenshots/
 
+# Run directories — ignore all generated run output (including debug_overlays)
+/runs/*
+!/runs/.gitkeep
+
 # Markdown reports — ignore all generated *.md except tracked docs.
 # (tester --report writes playthrough_log.md, caught by *.md below.)
 *.md
