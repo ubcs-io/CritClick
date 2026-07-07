@@ -189,7 +189,6 @@ class TestNamespacedDryRun:
         client.analyze.return_value = {
             "description": "x",
             "action": "done",
-            "coordinates": [],
             "reasoning": "x",
             "narrative": "x",
         }

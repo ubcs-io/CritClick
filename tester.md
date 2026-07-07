@@ -97,7 +97,7 @@ class VisionPlaythroughHarness:
         self.running = False
         self.process = None
         self.stuck_counter = 0
-        self.context_window = []
+        self.step_history = []
         self.log_file = "playthrough_log.jsonl"
 
         pyautogui.FAILSAFE = True
@@ -153,7 +153,7 @@ class VisionPlaythroughHarness:
 
     def analyze_and_act(self):
         img_b64 = self.capture_screen()
-        context_str = "\n".join(self.context_window[-3:]) if self.context_window else "Starting playthrough."
+        context_str = "\n".join(self.step_history[-8:]) if self.step_history else "Starting playthrough."
 
         try:
             response = self.llm.analyze(img_b64, self._get_system_prompt(), self._get_user_prompt(context_str))
@@ -169,7 +169,7 @@ class VisionPlaythroughHarness:
         action = response["action"]
         narrative = response.get("narrative", "No narrative provided.")
         logger.info(f"📝 Step {self.step+1}/{self.max_steps} | {narrative}")
-        self.context_window.append(f"Step {self.step+1}: {narrative}")
+        self.step_history.append(f"Step {self.step+1}: {narrative}")
 
         # Save structured log
         log_entry = {

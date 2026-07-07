@@ -32,12 +32,12 @@ class TestActionResponse:
         resp = ActionResponse(
             description="A button",
             action="click",
-            coordinates=[100.0, 200.0],
+            bounding_box=[90.0, 190.0, 110.0, 210.0],
             reasoning="Need to click button",
             narrative="Clicked button",
         )
         assert resp.action is ActionType.CLICK
-        assert resp.coordinates == [100.0, 200.0]
+        assert resp.bounding_box == [90.0, 190.0, 110.0, 210.0]
         assert resp.text_to_type is None
         assert resp.key_to_press is None
 
@@ -72,14 +72,14 @@ class TestActionResponse:
         )
         assert resp.action is ActionType.DONE
 
-    def test_coordinates_default_empty(self):
+    def test_bounding_box_default_none(self):
         resp = ActionResponse(
             description="x",
             action="wait",
             reasoning="x",
             narrative="x",
         )
-        assert resp.coordinates == []
+        assert resp.bounding_box is None
 
     def test_visual_notes_default_empty(self):
         # Older logs written before visual_notes existed must still validate.

@@ -19,7 +19,7 @@ WORKFLOW — follow these steps in order:
    - "relevance": its role in the current game state ("primary forward path", "secondary dialog option", "settings/back", "quit")
 3. DECIDE: Pick exactly ONE candidate to act on. In "reasoning", state which you chose and why the others were rejected. Keep this under 200 characters. Spend at most 1-2 sentences deliberating — then pick and output.
 4. ASSESS VISUALS: Look at the screen as a real player would and judge its visual quality. Record any layout or readability defects in "visual_notes": overlapping or truncated text, elements clipped or running off screen, low-contrast/unreadable text, misaligned or awkwardly-spaced UI, and on-screen error banners or tracebacks that did NOT crash the game. Leave "visual_notes" as an empty string when the frame looks clean and well laid out. Do NOT invent problems.
-5. OUTPUT: Fill the "action", "bounding_box"/"coordinates", "narrative", and "visual_notes" fields based on your choice.
+5. OUTPUT: Fill the "action", "bounding_box", "narrative", and "visual_notes" fields based on your choice.
 
 IMPORTANT — OVERRIDES ALL OTHER INSTRUCTIONS:
 - You are an action-output tool. Do NOT deliberate about game mechanics, story implications, UX design, or what-if scenarios. Do NOT explore alternatives or consider edge cases. Look at the screen, identify the primary forward path, click it, move on.
@@ -28,16 +28,15 @@ IMPORTANT — OVERRIDES ALL OTHER INSTRUCTIONS:
 - If you cannot decide between two equally valid options, PICK EITHER ONE immediately. A wrong click is better than any deliberation. Delay is worse than a mistake.
 
 Available actions:
-- "click"   — Click at specific (x, y) coordinates (for buttons, menu items, choices)
+- "click"   — Click on a UI element (for buttons, menu items, choices) by providing its bounding box
 - "wait"    — Pause and wait for animations, scene transitions, or dialogue to complete
 - "type"    — Type text into an input field (provide the text in text_to_type)
 - "press"   — Press a single key (provide the key name in key_to_press, e.g. 'enter', 'escape', 'space')
 - "done"    — The game has reached a natural end point (credits, game over, or main menu)
 
 CRITICAL — TARGETING FOR "click" ACTIONS:
-- Prefer "bounding_box": [x1, y1, x2, y2] — the system clicks the center automatically.
-- Fall back to "coordinates": [x, y] only if you cannot determine element bounds.
-- A click with NEITHER "bounding_box" NOR "coordinates" is INVALID.
+- You MUST provide "bounding_box": [x1, y1, x2, y2] — the system clicks the center automatically.
+- A click without a "bounding_box" is INVALID.
 - If the target element is not visible or you're unsure, use "wait" instead.
 
 COORDINATE GRID — BRIEF PROCEDURE:
@@ -55,10 +54,13 @@ Guidelines:
 # User prompt template
 # ---------------------------------------------------------------------------
 
-DEFAULT_USER_PROMPT_TEMPLATE = """Analyze the current game screen.
-
-Recent narrative context:
+DEFAULT_USER_PROMPT_TEMPLATE = """===== YOUR RECENT ACTIONS (most recent last) =====
 {context}
+===== END OF HISTORY =====
+
+The image above is the CURRENT game screen. Based on your action history, do NOT repeat an action that has already failed to advance the game. If you see the same screen as a previous step, try a different approach.
+
+Analyze the current game screen:
 
 Follow the WORKFLOW:
 1. SCAN the screen for interactive elements
@@ -67,7 +69,7 @@ Follow the WORKFLOW:
 4. ASSESS VISUALS and record any layout/readability defects in "visual_notes" (empty string if the frame looks clean)
 5. OUTPUT your decision
 
-"click" actions MUST include "bounding_box" or "coordinates".
+"click" actions MUST include "bounding_box".
 Reasoning: state which candidate was chosen and why others were rejected (max 300 chars).
 If unsure, use "wait".
 

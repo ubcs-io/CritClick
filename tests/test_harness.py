@@ -93,7 +93,7 @@ class TestActionExecution:
         resp = ActionResponse(
             description="Button",
             action="click",
-            coordinates=[100.0, 200.0],
+            bounding_box=[90.0, 190.0, 110.0, 210.0],
             reasoning="Need to click",
             narrative="Clicked",
         )
@@ -113,7 +113,7 @@ class TestActionExecution:
         resp = ActionResponse(
             description="Button",
             action="click",
-            coordinates=[100.0, 200.0],
+            bounding_box=[90.0, 190.0, 110.0, 210.0],
             reasoning="Need to click",
             narrative="Clicked",
         )
@@ -122,11 +122,10 @@ class TestActionExecution:
         harness.capturer.scale_coordinates.assert_called_once_with(100.0, 200.0)
         harness.capturer.click.assert_called_once_with(50, 100)
 
-    def test_click_no_coordinates(self, dry_run_harness):
+    def test_click_no_bounding_box(self, dry_run_harness):
         resp = ActionResponse(
             description="Button",
             action="click",
-            coordinates=[],
             reasoning="Need to click",
             narrative="Clicked",
         )
@@ -137,7 +136,7 @@ class TestActionExecution:
         resp = ActionResponse(
             description="Button",
             action="click",
-            coordinates=[5000.0, 5000.0],
+            bounding_box=[4990.0, 4990.0, 5010.0, 5010.0],
             reasoning="Need to click",
             narrative="Clicked",
         )
@@ -207,7 +206,7 @@ class TestStuckDetection:
             description="x", action="wait", reasoning="x", narrative="x"
         )
         click_resp = ActionResponse(
-            description="x", action="click", coordinates=[1, 1], reasoning="x", narrative="x"
+            description="x", action="click", bounding_box=[0.5, 0.5, 1.5, 1.5], reasoning="x", narrative="x"
         )
         harness._execute(wait_resp)
         harness._execute(wait_resp)
@@ -223,8 +222,8 @@ class TestRunSummary:
         harness = Harness(sample_settings, launcher, client, dry_run=True)
 
         responses = [
-            ActionResponse(description="x", action="click", coordinates=[1, 1], reasoning="x", narrative="x"),
-            ActionResponse(description="x", action="click", coordinates=[1, 1], reasoning="x", narrative="x"),
+            ActionResponse(description="x", action="click", bounding_box=[0.5, 0.5, 1.5, 1.5], reasoning="x", narrative="x"),
+            ActionResponse(description="x", action="click", bounding_box=[0.5, 0.5, 1.5, 1.5], reasoning="x", narrative="x"),
             ActionResponse(description="x", action="wait", reasoning="x", narrative="x"),
             ActionResponse(description="x", action="done", reasoning="x", narrative="x"),
         ]
@@ -269,7 +268,7 @@ class TestRunRecap:
                     "llm_response": {
                         "description": "Main menu",
                         "action": "click",
-                        "coordinates": [100, 200],
+                        "bounding_box": [90, 190, 110, 210],
                         "reasoning": "Start button visible",
                         "narrative": "Clicked start button.",
                     },

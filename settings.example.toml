@@ -110,7 +110,7 @@ save_screenshots = true
 # Directory for saved screenshots
 screenshot_dir = "screenshots"
 # Number of recent narrative entries to include in LLM context
-context_window_size = 3
+step_history_window = 8
 # Log level: DEBUG, INFO, WARNING, ERROR
 log_level = "INFO"
 

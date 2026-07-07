@@ -104,7 +104,7 @@ class Harness:
 
         # Runtime state
         self.step = 0
-        self.context_window: list[str] = []
+        self.step_history: list[str] = []
         self.stuck_counter = 0
         self.last_action: str | None = None
         self.start_time: float | None = None
@@ -590,11 +590,26 @@ class Harness:
             return "unknown"
 
         # 2. Build prompts
-        context_str = (
-            "\n".join(self.context_window[-self.settings.logging.context_window_size :])
-            if self.context_window
-            else "Starting playthrough."
-        )
+        # Build step history for the LLM with rich per-step context.
+        # The window must be wide enough to span a full game-loop cycle so the
+        # model remembers which screens it has already visited.
+        history_entries = self.step_history
+        window = self.settings.logging.step_history_window
+        visible = history_entries[-window:] if window > 0 and history_entries else []
+        context_str = "\n".join(visible) if visible else "(no prior steps — starting playthrough)"
+
+        # Inject a stuck-state warning when the harness has detected repetition.
+        # This makes the VLM a participant in recovery rather than a passive
+        # recipient of key-press recovery strategies.
+        stuck_warning = ""
+        if self.stuck_counter >= 2:
+            stuck_warning = (
+                f"\n\n⚠️  STUCK-STATE WARNING: You have repeated the same action type "
+                f"('{self.last_action}') {self.stuck_counter + 1} times in a row. "
+                f"These attempts appear to have had no effect. Pick a DIFFERENT action "
+                f"or target a DIFFERENT element. Do NOT repeat the last action.\n"
+            )
+        context_str = context_str + stuck_warning
         system_prompt = make_system_prompt(self.settings.system_prompt)
         user_prompt = make_user_prompt(context_str, self.settings.user_prompt_template)
 
@@ -625,11 +640,10 @@ class Harness:
         # 5. Debug: log full parsed ActionResponse
         if self.debug_harness:
             logger.info(
-                "🔍 [DEBUG-HARNESS] Step %d/%d | ActionResponse: action=%s | coords=%s | text=%s | key=%s | narrative=%s | reasoning=%s",
+                "🔍 [DEBUG-HARNESS] Step %d/%d | ActionResponse: action=%s | text=%s | key=%s | narrative=%s | reasoning=%s",
                 self.step,
                 self.settings.harness.max_steps,
                 response.action.value,
-                response.coordinates,
                 response.text_to_type,
                 response.key_to_press,
                 response.narrative,
@@ -643,7 +657,18 @@ class Harness:
             self.settings.harness.max_steps,
             response.narrative,
         )
-        self.context_window.append(f"Step {self.step}: {response.narrative}")
+        # Record a rich step entry: action type + bounding box centre so the
+        # model can see exactly what was done and where clicks landed.
+        action_label = response.action.value.upper()
+        coord_detail = ""
+        if response.action.value == "click":
+            bb = response.bounding_box
+            if bb is not None and len(bb) == 4:
+                cx = int((bb[0] + bb[2]) / 2)
+                cy = int((bb[1] + bb[3]) / 2)
+                coord_detail = f" at bbox-centre ({cx}, {cy})"
+        entry = f"Step {self.step} [{action_label}{coord_detail}]: {response.narrative}"
+        self.step_history.append(entry)
         self._write_log_entry(response, image_b64, duration_ms)
 
         # 7. Generate debug overlay image (when debug_screen is enabled).
@@ -782,19 +807,15 @@ class Harness:
             return "waited"
 
         if action == "click":
-            # Resolve click target: prefer bounding_box centre, fall back to coordinates
+            # Resolve click target: bounding_box centre
             bb = response.bounding_box
             if bb is not None and len(bb) == 4:
                 # Centre of bounding box: [x1, y1, x2, y2]
                 raw_x = (bb[0] + bb[2]) / 2.0
                 raw_y = (bb[1] + bb[3]) / 2.0
                 target_source = f"b-box centre from [{bb[0]:.0f},{bb[1]:.0f},{bb[2]:.0f},{bb[3]:.0f}]"
-            elif len(response.coordinates) >= 2:
-                raw_x = response.coordinates[0]
-                raw_y = response.coordinates[1]
-                target_source = "raw coordinates"
             else:
-                logger.warning("Step %d/%d | ⚠️  'click' action without valid coordinates or bounding_box — skipping.", self.step, self.settings.harness.max_steps)
+                logger.warning("Step %d/%d | ⚠️  'click' action without bounding_box — skipping.", self.step, self.settings.harness.max_steps)
                 return "unknown"
 
             if self.debug_harness:
@@ -842,8 +863,8 @@ class Harness:
                 logger.info("Step %d/%d | 🔍 [DRY RUN] Would click (%d, %d) [%s]", self.step, self.settings.harness.max_steps, x, y, target_source)
             # Feed the actual click coordinates back to the LLM context
             # so it can self-correct if clicks are landing in the wrong place.
-            self.context_window.append(
-                f"Click executed at absolute screen coordinates ({x}, {y}) [{target_source}]."
+            self.step_history.append(
+                f"  ↳ Click executed at absolute screen coordinates ({x}, {y}) [{target_source}]."
             )
             return "clicked"
 
@@ -1031,16 +1052,23 @@ class Harness:
         Produces ``debug_step_NNNN.png`` files in the run directory.
         """
         try:
-            # Determine bounding box and click point from the response
+            # Determine bounding box and click point from the response.
+            # Model-space coordinates must be mapped to capture-pixel space
+            # via _to_pixel_space (calibration / coordinate_max normalisation)
+            # so the overlay crosshair and bbox land on the correct image
+            # pixels — the same transform that scale_coordinates applies
+            # before the DPI scale and window offset for the real click.
             bounding_box: list[float] | None = None
             click_point: tuple[int, int] | None = None
 
             bb = response.bounding_box
             if bb is not None and len(bb) == 4:
-                bounding_box = list(bb)
-                # Compute centre in image-pixel space (before scale + offset)
-                cx = int((bb[0] + bb[2]) / 2)
-                cy = int((bb[1] + bb[3]) / 2)
+                # Transform model-space corners to capture-pixel space.
+                px1, py1 = self.capturer._to_pixel_space(bb[0], bb[1])
+                px2, py2 = self.capturer._to_pixel_space(bb[2], bb[3])
+                bounding_box = [px1, py1, px2, py2]
+                cx = int((px1 + px2) / 2)
+                cy = int((py1 + py2) / 2)
                 click_point = (cx, cy)
 
             # Build metadata dict
@@ -1053,8 +1081,6 @@ class Harness:
                     f"[{response.bounding_box[0]:.0f}, {response.bounding_box[1]:.0f}, "
                     f"{response.bounding_box[2]:.0f}, {response.bounding_box[3]:.0f}]"
                 )
-            elif response.coordinates:
-                metadata["Coords"] = str(response.coordinates)
             if click_point:
                 metadata["ClickPt (img)"] = str(click_point)
             metadata["Scale"] = f"{self.capturer.scale:.4f}"

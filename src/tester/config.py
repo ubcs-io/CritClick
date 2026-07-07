@@ -275,9 +275,11 @@ class LoggingSettings(BaseModel):
     log_file: str = Field(default="playthrough_log.jsonl")
     save_screenshots: bool = Field(default=True)
     screenshot_dir: str = Field(default="screenshots")
-    context_window_size: int = Field(
-        default=3, ge=0,
-        description="Number of recent narrative entries to include in the LLM prompt.",
+    step_history_window: int = Field(
+        default=8, ge=0,
+        description="Number of recent step-history entries to include in the LLM prompt. "
+        "Each entry records the action taken and where it clicked. Set high enough to span "
+        "a full game-loop cycle so the model remembers which screens it has already visited.",
     )
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(default="INFO")
 

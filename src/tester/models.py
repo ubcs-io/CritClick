@@ -54,12 +54,6 @@ class ActionResponse(BaseModel):
             "'type' to input text, 'done' when the game has ended or returned to menu."
         ),
     )
-    coordinates: list[float] = Field(
-        default_factory=list,
-        description="(x, y) pixel coordinates relative to top-left of the game window "
-        "for 'click' actions. Use bounding_box instead for more precise targeting. "
-        "May be empty for 'wait'/'done'.",
-    )
     bounding_box: list[float] | None = Field(
         None,
         description="[x1, y1, x2, y2] bounding box of the target element in pixels "
