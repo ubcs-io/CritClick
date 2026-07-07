@@ -313,38 +313,64 @@ class TestRunRecap:
     def test_recap_returns_dict_on_success(self, recap_harness):
         harness, _tmpdir = recap_harness
         mock_client: MagicMock = harness.llm  # type: ignore[assignment]
-        mock_client.analyze.return_value = {
+        mock_client.summarize.return_value = {
             "next_action": "Add a save button to the options menu.",
             "summary": "The game had no save button in the options menu.",
             "related_steps": [2],
+            "persona_reviews": [
+                {
+                    "persona": "Impatient completionist",
+                    "experience": "By step 2 I'm racing ahead with no way to save.",
+                    "friction": ["No save button at step 2"],
+                    "sentiment": "frustrated",
+                }
+            ],
+            "overall_verdict": "Flows well but lacks a save affordance.",
         }
 
         result = harness._llm_recap()
         assert result is not None
         assert result["next_action"] == "Add a save button to the options menu."
         assert result["related_steps"] == [2]
+        assert result["persona_reviews"][0]["persona"] == "Impatient completionist"
+        assert result["overall_verdict"]
 
     def test_recap_calls_llm_with_recap_prompt(self, recap_harness):
         harness, _tmpdir = recap_harness
         mock_client: MagicMock = harness.llm  # type: ignore[assignment]
-        mock_client.analyze.return_value = {
+        mock_client.summarize.return_value = {
             "next_action": "No action needed — everything worked fine.",
         }
 
         harness._llm_recap()
-        mock_client.analyze.assert_called_once()
-        _, system_prompt, user_prompt = mock_client.analyze.call_args[0]
-        assert "next action" in system_prompt.lower()
+        mock_client.summarize.assert_called_once()
+        _, system_prompt, user_prompt = mock_client.summarize.call_args[0]
+        assert "next_action" in system_prompt
         assert "Step 1" in user_prompt
         assert "Step 2" in user_prompt
         assert "Step 3" in user_prompt
         assert "completed" in user_prompt
         assert "click=1" in user_prompt
+        # No personas configured → the prompt asks for a single "Typical player".
+        assert "Typical player" in user_prompt
+        # The recap is given its own larger token budget.
+        assert mock_client.summarize.call_args.kwargs["max_tokens"] >= 1500
+
+    def test_recap_passes_configured_personas(self, recap_harness):
+        harness, _tmpdir = recap_harness
+        harness.settings.review.personas = ["Speedrunner", "Lore reader"]
+        mock_client: MagicMock = harness.llm  # type: ignore[assignment]
+        mock_client.summarize.return_value = {"next_action": "Ship it."}
+
+        harness._llm_recap()
+        _, _system_prompt, user_prompt = mock_client.summarize.call_args[0]
+        assert "Speedrunner" in user_prompt
+        assert "Lore reader" in user_prompt
 
     def test_recap_returns_none_on_llm_error(self, recap_harness):
         harness, _tmpdir = recap_harness
         mock_client: MagicMock = harness.llm  # type: ignore[assignment]
-        mock_client.analyze.side_effect = RuntimeError("API down")
+        mock_client.summarize.side_effect = RuntimeError("API down")
 
         result = harness._llm_recap()
         assert result is None
@@ -352,7 +378,7 @@ class TestRunRecap:
     def test_recap_returns_none_on_validation_error(self, recap_harness):
         harness, _tmpdir = recap_harness
         mock_client: MagicMock = harness.llm  # type: ignore[assignment]
-        mock_client.analyze.return_value = {"wrong_field": "bad"}
+        mock_client.summarize.return_value = {"wrong_field": "bad"}
 
         result = harness._llm_recap()
         assert result is None
@@ -394,6 +420,52 @@ class TestRunRecap:
             harness.step = 3
             result = harness._llm_recap()
             assert result is None
+
+
+class TestNextActionRendering:
+    """The persona review must render into NEXT_ACTION.md."""
+
+    def test_write_next_action_renders_persona_sections(self, sample_settings):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            harness = Harness(
+                sample_settings,
+                MagicMock(),
+                MagicMock(spec=LLMClient),
+                dry_run=True,
+                run_id="render-test",
+                runs_dir=tmpdir,
+            )
+            report = {
+                "next_action": "Fix the overlapping title text.",
+                "summary": "Menu polish issues.",
+                "persona_reviews": [
+                    {
+                        "persona": "Impatient completionist",
+                        "experience": "I blaze through but hit a wall at step 3.",
+                        "friction": ["Overlapping title text at step 1"],
+                        "sentiment": "frustrated",
+                    },
+                    {
+                        "persona": "First-time casual",
+                        "experience": "I'm unsure where to click on the menu.",
+                        "friction": [],
+                        "sentiment": "confused",
+                    },
+                ],
+                "overall_verdict": "Playable but rough around the menu.",
+                "related_steps": [1, 3],
+                "status": "completed",
+                "severity": "info",
+            }
+            harness._write_next_action(report)
+
+            content = (Path(tmpdir) / "render-test" / "NEXT_ACTION.md").read_text()
+            assert "## Player Experience Review" in content
+            assert "### Impatient completionist — _frustrated_" in content
+            assert "- Overlapping title text at step 1" in content
+            assert "### First-time casual — _confused_" in content
+            assert "## Overall" in content
+            assert "Playable but rough around the menu." in content
 
 
 class TestBuildNextAction:
@@ -453,6 +525,112 @@ class TestBuildNextAction:
         report = harness._build_next_action()
         assert report["status"] == "completed"
         assert report["next_action"]  # non-empty deterministic fallback
+
+
+class TestErrorContextCollection:
+    """Game-side error context is drained from the launcher and prioritised."""
+
+    def _harness(self, sample_settings, *, stdout=None, stderr=None, engine_log=None,
+                 dry_run=False):
+        launcher = MagicMock()
+        launcher.get_stdout_tail.return_value = stdout
+        launcher.get_stderr_tail.return_value = stderr
+        launcher.read_engine_error_log.return_value = engine_log
+        client = MagicMock(spec=LLMClient)
+        return Harness(sample_settings, launcher, client, dry_run=dry_run)
+
+    def test_engine_log_preferred_over_stderr(self, sample_settings):
+        harness = self._harness(
+            sample_settings,
+            stderr='File "game/other.rpy", line 9\nException: noise\n',
+            engine_log=(
+                'Traceback (most recent call last):\n'
+                '  File "game/script.rpy", line 42, in script\n'
+                'Exception: image not found: bg office\n'
+            ),
+        )
+        harness._collect_error_context()
+        assert harness._error_source_file == "game/script.rpy"
+        assert "image not found" in harness._error_excerpt
+
+    def test_stderr_used_when_no_engine_log(self, sample_settings):
+        harness = self._harness(
+            sample_settings,
+            stderr=(
+                'Traceback (most recent call last):\n'
+                '  File "game/menu.rpy", line 7, in script\n'
+                'Exception: kaboom\n'
+            ),
+        )
+        harness._collect_error_context()
+        assert harness._error_source_file == "game/menu.rpy"
+        assert "kaboom" in harness._error_excerpt
+
+    def test_soft_run_ignores_benign_stderr(self, sample_settings):
+        # A clean run whose engine printed only warnings must not be reported
+        # as an error when an error signal is required.
+        harness = self._harness(
+            sample_settings,
+            stderr="INFO: shader compiled\nWARNING: deprecated setting\n",
+        )
+        harness._collect_error_context(require_error_signal=True)
+        assert harness._error_source_file is None
+        assert harness._error_excerpt is None
+
+    def test_hard_run_surfaces_stderr_without_classic_signal(self, sample_settings):
+        # On a hard failure we surface the tail even if it lacks a traceback.
+        harness = self._harness(sample_settings, stderr="Killed: 9\n")
+        harness._collect_error_context(require_error_signal=False)
+        assert harness._error_excerpt is not None
+        assert "Killed" in harness._error_excerpt
+
+    def test_godot_script_error_recognised_as_signal(self, sample_settings):
+        harness = self._harness(
+            sample_settings,
+            stderr="SCRIPT ERROR: Invalid call. at: res://player.gd:88\n",
+        )
+        harness._collect_error_context(require_error_signal=True)
+        assert harness._error_source_file == "res://player.gd:88"
+
+
+class TestFinalErrorContext:
+    """_gather_final_error_context wires collection + harness-crash fallback."""
+
+    def test_crash_falls_back_to_harness_traceback(self, sample_settings):
+        # dry_run skips launcher collection; only the harness traceback remains.
+        launcher = MagicMock()
+        harness = Harness(sample_settings, launcher, MagicMock(spec=LLMClient), dry_run=True)
+        harness.step = 4
+        harness.completion_reason = "crashed: boom"
+        harness._crash_traceback = (
+            'Traceback (most recent call last):\n'
+            '  File "src/tester/harness.py", line 500, in analyze_and_act\n'
+            'RuntimeError: boom\n'
+        )
+        harness._gather_final_error_context(exit_code=2)
+        assert harness._error_source_file == "src/tester/harness.py"
+        assert "RuntimeError: boom" in harness._error_excerpt
+
+    def test_game_error_wins_over_harness_traceback_on_crash(self, sample_settings):
+        launcher = MagicMock()
+        launcher.get_stdout_tail.return_value = None
+        launcher.get_stderr_tail.return_value = None
+        launcher.read_engine_error_log.return_value = (
+            'Traceback (most recent call last):\n'
+            '  File "game/script.rpy", line 12, in script\n'
+            'Exception: real game error\n'
+        )
+        harness = Harness(sample_settings, launcher, MagicMock(spec=LLMClient), dry_run=False)
+        harness.completion_reason = "crashed: boom"
+        harness._crash_traceback = (
+            'Traceback (most recent call last):\n'
+            '  File "src/tester/harness.py", line 1, in x\n'
+            'RuntimeError: boom\n'
+        )
+        harness._gather_final_error_context(exit_code=2)
+        # The game's own crash log, not the harness traceback, is surfaced.
+        assert harness._error_source_file == "game/script.rpy"
+        assert "real game error" in harness._error_excerpt
 
 
 class TestCoordinateGridApplication:

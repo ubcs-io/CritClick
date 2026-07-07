@@ -15,13 +15,21 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from abc import ABC, abstractmethod
+from collections import deque
 from pathlib import Path
 
 from .models import GameConfig
 
 logger = logging.getLogger("tester.launcher")
+
+# Continuously-drained output is kept in a bounded ring buffer so a chatty game
+# can never fill the OS pipe and deadlock, and so its final output survives for
+# the post-run recap. Sized to comfortably hold an engine traceback.
+_MAX_OUTPUT_LINES = 2000
+_DEFAULT_TAIL_CHARS = 8000
 
 
 def capture_git_info(path: str | os.PathLike) -> dict:
@@ -77,6 +85,17 @@ class Launcher(ABC):
         self.headless = headless
         self.process: subprocess.Popen | None = None
 
+        # Continuous output capture. Reader threads drain stdout/stderr into
+        # these bounded buffers so the pipes never block and the tail is always
+        # available (whether the game died, crashed, or finished cleanly).
+        self._stdout_buffer: deque[str] = deque(maxlen=_MAX_OUTPUT_LINES)
+        self._stderr_buffer: deque[str] = deque(maxlen=_MAX_OUTPUT_LINES)
+        self._output_lock = threading.Lock()
+        self._reader_threads: list[threading.Thread] = []
+        # Wall-clock time of the most recent launch, used to distinguish a
+        # crash log written by *this* run from a stale one left by a prior run.
+        self._launched_at: float | None = None
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -102,12 +121,16 @@ class Launcher(ABC):
         if sys.platform == "linux" and self.headless and self.config.resolution:
             env.setdefault("DISPLAY", ":0")
 
+        self._launched_at = time.time()
         self.process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=env,
         )
+        # Start draining the pipes immediately so a verbose game can't fill the
+        # OS pipe buffer and block mid-run.
+        self._start_output_readers()
         # Give the game time to initialise
         time.sleep(5)
 
@@ -124,6 +147,100 @@ class Launcher(ABC):
             self.process.kill()
             self.process.wait()
         self.process = None
+        # Pipes have hit EOF now the process is gone — let the reader threads
+        # finish so the captured tail is complete before anyone reads it.
+        self._join_output_readers()
+
+    # ------------------------------------------------------------------
+    # Output capture
+    # ------------------------------------------------------------------
+
+    def _start_output_readers(self) -> None:
+        """Spawn daemon threads that drain stdout/stderr into ring buffers."""
+        if self.process is None:
+            return
+        self._reader_threads = []
+        for stream, buffer in (
+            (self.process.stdout, self._stdout_buffer),
+            (self.process.stderr, self._stderr_buffer),
+        ):
+            if stream is None:
+                continue
+            t = threading.Thread(
+                target=self._drain_stream, args=(stream, buffer), daemon=True
+            )
+            t.start()
+            self._reader_threads.append(t)
+
+    def _drain_stream(self, stream, buffer: deque[str]) -> None:
+        """Read *stream* line-by-line until EOF, appending decoded text to *buffer*."""
+        try:
+            for raw in iter(stream.readline, b""):
+                line = raw.decode("utf-8", errors="replace")
+                with self._output_lock:
+                    buffer.append(line)
+        except (ValueError, OSError):
+            # Stream closed underneath us during shutdown — nothing left to read.
+            pass
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    def _join_output_readers(self, timeout: float = 2.0) -> None:
+        """Wait briefly for the reader threads to drain remaining output."""
+        for t in self._reader_threads:
+            if t.is_alive():
+                t.join(timeout=timeout)
+        self._reader_threads = []
+
+    def _tail(self, buffer: deque[str], max_chars: int) -> str | None:
+        """Return the trailing *max_chars* of a buffer's text, or None if empty."""
+        with self._output_lock:
+            text = "".join(buffer)
+        text = text.strip()
+        if not text:
+            return None
+        return text[-max_chars:] if max_chars else text
+
+    def get_stdout_tail(self, max_chars: int = _DEFAULT_TAIL_CHARS) -> str | None:
+        """Return the tail of the game's captured stdout, or None if empty."""
+        return self._tail(self._stdout_buffer, max_chars)
+
+    def get_stderr_tail(self, max_chars: int = _DEFAULT_TAIL_CHARS) -> str | None:
+        """Return the tail of the game's captured stderr, or None if empty."""
+        return self._tail(self._stderr_buffer, max_chars)
+
+    def read_engine_error_log(self, max_chars: int = _DEFAULT_TAIL_CHARS) -> str | None:
+        """Return the engine's own crash log for this run, if the engine writes one.
+
+        Base implementation returns ``None`` — engines that persist a dedicated
+        crash log (e.g. Ren'Py's ``traceback.txt``) override this. Only logs
+        written *since this run launched* are returned, so a stale file left by
+        a previous run is ignored.
+        """
+        return None
+
+    def _read_recent_file(self, path: Path, max_chars: int) -> str | None:
+        """Return the tail of *path* if it exists and was written by this run.
+
+        Freshness is judged against ``self._launched_at`` (with a small slack)
+        so a crash log from an earlier run is never mistaken for this one's.
+        """
+        try:
+            if not path.is_file():
+                return None
+            if self._launched_at is not None:
+                # Allow a couple of seconds of slack for clock/mtime granularity.
+                if path.stat().st_mtime < self._launched_at - 2.0:
+                    return None
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return None
+        if not text:
+            return None
+        return text[-max_chars:] if max_chars else text
 
     def is_alive(self) -> bool:
         """Check whether the game process is still running."""
@@ -213,6 +330,18 @@ class RenPyLauncher(Launcher):
         raise FileNotFoundError(
             f"Ren'Py executable not found in '{self.config.path}'. "
             f"Searched: {candidates}. Set [game].executable in your config."
+        )
+
+    def read_engine_error_log(self, max_chars: int = _DEFAULT_TAIL_CHARS) -> str | None:
+        """Return Ren'Py's ``traceback.txt`` if it crashed this run.
+
+        On an uncaught exception Ren'Py writes a full, formatted traceback to
+        ``<basedir>/traceback.txt`` — the most complete error source available,
+        and better structured than the stderr tail. ``self.config.path`` is the
+        base directory we pass to ``renpy.sh``.
+        """
+        return self._read_recent_file(
+            Path(self.config.path) / "traceback.txt", max_chars
         )
 
     def build_command(self, executable: str) -> list[str]:

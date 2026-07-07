@@ -364,7 +364,6 @@ class Harness:
                     logger.warning("⚠️  Game process died unexpectedly.")
                     self.completion_reason = "game_died"
                     exit_code = EXIT_GAME_DIED
-                    self._log_game_output()
                     break
 
                 result = self.analyze_and_act()
@@ -386,17 +385,15 @@ class Harness:
             logger.exception(f"💥 Harness crashed: {exc}")
             self.completion_reason = f"crashed: {exc}"
             exit_code = EXIT_RUNTIME_ERROR
-            # Preserve the traceback so the next-action takeaway can quote the
-            # real error and any source file it names. Not calling
-            # _log_game_output here: the game may still be alive and
-            # communicate() would block.
+            # Preserve the harness traceback. Game-side error context (the
+            # engine crash log + the continuously-drained stderr) is gathered in
+            # the finally block below and preferred over this when present, so
+            # the takeaway cites the *game's* error rather than ours.
             self._crash_traceback = traceback.format_exc()
-            self._error_source_file, self._error_excerpt = self._extract_error_source(
-                self._crash_traceback
-            )
         finally:
             self.stop()
             self._exit_code = exit_code
+            self._gather_final_error_context(exit_code)
             report = self._build_next_action()
             self._log_summary(report)
             self._write_next_action(report)
@@ -410,45 +407,98 @@ class Harness:
             self.launcher.stop()
         logger.info("🛑 Harness stopped.")
 
-    def _log_game_output(self) -> None:
-        """Read and log any stdout/stderr produced by the game process.
+    # Recognisable markers of an actual error/traceback in captured output.
+    # Used to avoid mistaking benign engine warnings on a clean run for a
+    # failure. Covers Python/Ren'Py tracebacks and Godot error lines.
+    _ERROR_SIGNAL_RE = re.compile(
+        r"Traceback \(most recent call last\)|"
+        r"Exception:|"
+        r"\bError:|"
+        r"SCRIPT ERROR|USER ERROR|\bERROR:|"
+        r"Segmentation fault|Fatal error|"
+        r'File "[^"]+", line \d+',
+        re.MULTILINE,
+    )
 
-        Called when the game process dies unexpectedly so that error messages
-        that would otherwise be swallowed are surfaced in the log.
+    def _looks_like_error(self, text: str | None) -> bool:
+        """Whether *text* contains a recognisable error/traceback signature."""
+        return bool(text and self._ERROR_SIGNAL_RE.search(text))
+
+    def _gather_final_error_context(self, exit_code: int) -> None:
+        """Collect game-side error context once, after the game has stopped.
+
+        Runs for every termination mode. Hard failures (game death, crash,
+        config/runtime error) surface whatever the game last emitted; soft
+        outcomes only surface output that actually looks like an error, so a
+        clean run isn't reported as failing on benign engine warnings. Finally,
+        a harness crash with no game-side error falls back to our own traceback.
         """
-        process = self.launcher.process
-        if process is None:
+        reason = self.completion_reason or ""
+        is_hard = (
+            reason == "game_died"
+            or reason.startswith("crashed:")
+            or exit_code in (EXIT_CONFIG_ERROR, EXIT_RUNTIME_ERROR)
+        )
+        if not self.dry_run:
+            self._collect_error_context(require_error_signal=not is_hard)
+
+        # Harness-crash fallback: if the game itself surfaced nothing, mine the
+        # harness traceback so we still name a source file + excerpt.
+        if self._crash_traceback and not self._error_source_file and not self._error_excerpt:
+            self._error_source_file, self._error_excerpt = self._extract_error_source(
+                self._crash_traceback
+            )
+
+    def _collect_error_context(self, require_error_signal: bool = False) -> None:
+        """Pull the game's stdout/stderr tails and engine crash log, non-blocking.
+
+        Reads from the launcher's continuously-drained buffers (safe whether or
+        not the game is still alive) plus the engine's own crash log file. Sets
+        ``_game_stdout_tail``/``_game_stderr_tail`` for visibility and, when an
+        error is found, ``_error_source_file``/``_error_excerpt``.
+
+        Args:
+            require_error_signal: When True, stderr/stdout are only mined for an
+                error when they actually look like one (see ``_looks_like_error``).
+                The engine crash log is always trusted — it only exists on a real
+                crash.
+        """
+        try:
+            stdout_tail = self.launcher.get_stdout_tail()
+            stderr_tail = self.launcher.get_stderr_tail()
+            engine_log = self.launcher.read_engine_error_log()
+        except Exception as exc:  # defensive: never let this break shutdown
+            logger.debug("Could not collect game error context: %s", exc)
             return
 
-        # If the process hasn't been reaped yet, read the captured pipes
-        stdout, stderr = process.communicate()
-        if stdout:
-            try:
-                stdout_text = stdout.decode("utf-8", errors="replace")
-            except Exception:
-                stdout_text = str(stdout)
-            if stdout_text.strip():
-                self._game_stdout_tail = stdout_text[-4000:]
-                logger.info(
-                    "📤 Game stdout:\n%s",
-                    self._game_stdout_tail,
-                )
-        if stderr:
-            try:
-                stderr_text = stderr.decode("utf-8", errors="replace")
-            except Exception:
-                stderr_text = str(stderr)
-            if stderr_text.strip():
-                self._game_stderr_tail = stderr_text[-4000:]
-                logger.info(
-                    "📥 Game stderr:\n%s",
-                    self._game_stderr_tail,
-                )
-                # A game-engine traceback is the one place a specific source
-                # file surfaces — extract it for the next-action takeaway.
-                self._error_source_file, self._error_excerpt = self._extract_error_source(
-                    stderr_text
-                )
+        if stdout_tail:
+            self._game_stdout_tail = stdout_tail
+        if stderr_tail:
+            self._game_stderr_tail = stderr_tail
+        if engine_log:
+            logger.info("🧾 Engine crash log:\n%s", engine_log)
+        elif stderr_tail:
+            logger.info("📥 Game stderr:\n%s", stderr_tail)
+
+        # Choose which stream to mine for a source file + excerpt. The engine's
+        # own crash log is always a genuine error and wins outright; otherwise
+        # fall back to stderr then stdout, gated by the error-signal requirement.
+        candidates: list[str] = []
+        if engine_log:
+            candidates.append(engine_log)
+        else:
+            for tail in (stderr_tail, stdout_tail):
+                if tail and (not require_error_signal or self._looks_like_error(tail)):
+                    candidates.append(tail)
+
+        for candidate in candidates:
+            source, excerpt = self._extract_error_source(candidate)
+            if source or excerpt:
+                if source:
+                    self._error_source_file = source
+                if excerpt:
+                    self._error_excerpt = excerpt
+                break
 
     # Matches file references in engine/interpreter tracebacks, most-specific first:
     #   Python/Ren'Py:  File "game/script.rpy", line 123, in foo
@@ -469,7 +519,7 @@ class Harness:
             return None, None
 
         lines = [ln for ln in text.splitlines() if ln.strip()]
-        excerpt = "\n".join(lines[-15:]) if lines else None
+        excerpt = "\n".join(lines[-40:]) if lines else None
 
         source_file: str | None = None
         # Last match wins (closest to the failure). Check both conventions.
@@ -989,6 +1039,11 @@ class Harness:
         related = report.get("related_steps") or []
         related_str = f"  (step {', '.join(map(str, related))})" if related else ""
         print("\n" + "=" * 60)
+        overall = (report.get("overall_verdict") or "").strip()
+        if overall:
+            print("🎭 PLAYER EXPERIENCE:")
+            print(f"   {overall}")
+            print("-" * 60)
         print(f"➡️  NEXT ACTION:{related_str}")
         print(f"   {(report.get('next_action') or '').strip()}")
         src = report.get("error_source_file")
@@ -1258,11 +1313,15 @@ class Harness:
             narrative = llm_resp.get("narrative", "")
             action = llm_resp.get("action", "")
             reasoning = llm_resp.get("reasoning", "")
+            visual_notes = (llm_resp.get("visual_notes") or "").strip()
             duration = entry.get("duration_ms", 0)
-            step_lines.append(
+            line = (
                 f"Step {step_num} [{action}] ({duration}ms): {narrative}\n"
                 f"  Reasoning: {reasoning}"
             )
+            if visual_notes:
+                line += f"\n  Visual: {visual_notes}"
+            step_lines.append(line)
 
         step_log = "\n".join(step_lines)
 
@@ -1271,6 +1330,7 @@ class Harness:
         actions_str = ", ".join(
             f"{k}={v}" for k, v in sorted(self.action_counts.items())
         ) or "none"
+        personas = self.settings.review.personas
         system_prompt = make_recap_system_prompt()
         user_prompt = make_recap_user_prompt(
             steps_completed=self.step,
@@ -1279,7 +1339,14 @@ class Harness:
             action_counts=actions_str,
             step_log=step_log,
             error_context=self._error_excerpt or "",
+            personas=personas,
         )
+
+        # The persona-based review is far longer than a per-step action, so give the
+        # recap its own budget that scales with how many personas were configured
+        # (min one 'Typical player' review). Clamp to the API ceiling.
+        n_reviews = max(1, len(personas))
+        recap_max_tokens = min(6000, max(1500, 800 + 700 * n_reviews))
 
         # Call LLM — recap is text-only, so send a minimal 1×1 PNG placeholder
         # to satisfy the vision API contract while keeping focus on the text.
@@ -1287,7 +1354,9 @@ class Harness:
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
         )
         try:
-            raw = self.llm.analyze(PLACEHOLDER_PNG, system_prompt, user_prompt)
+            raw = self.llm.summarize(
+                PLACEHOLDER_PNG, system_prompt, user_prompt, max_tokens=recap_max_tokens
+            )
         except RuntimeError as exc:
             logger.warning("📋 Recap LLM call failed: %s", exc)
             return None
@@ -1312,6 +1381,31 @@ class Harness:
         if summary:
             lines.append("## Summary\n")
             lines.append(f"{summary}\n")
+
+        persona_reviews = report.get("persona_reviews") or []
+        overall = (report.get("overall_verdict") or "").strip()
+        if persona_reviews or overall:
+            lines.append("## Player Experience Review\n")
+            for pr in persona_reviews:
+                persona = (pr.get("persona") or "Player").strip()
+                sentiment = (pr.get("sentiment") or "").strip()
+                heading = f"### {persona}"
+                if sentiment:
+                    heading += f" — _{sentiment}_"
+                lines.append(heading + "\n")
+                experience = (pr.get("experience") or "").strip()
+                if experience:
+                    lines.append(f"{experience}\n")
+                friction = pr.get("friction") or []
+                for point in friction:
+                    point = (point or "").strip()
+                    if point:
+                        lines.append(f"- {point}")
+                if friction:
+                    lines.append("")  # blank line after the bullet list
+            if overall:
+                lines.append("## Overall\n")
+                lines.append(f"{overall}\n")
 
         related = report.get("related_steps") or []
         if related:

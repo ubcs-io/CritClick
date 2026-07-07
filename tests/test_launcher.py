@@ -1,7 +1,9 @@
 """Tests for launcher command construction and factory."""
 
 
+import io
 import os
+import time
 
 import pytest
 
@@ -67,6 +69,86 @@ class TestCustomLauncher:
         launcher = CustomLauncher(config)
         cmd = launcher.build_command("/usr/local/bin/mygame")
         assert "/usr/local/bin/mygame" in cmd
+
+
+class TestOutputCapture:
+    """The reader threads drain stdout/stderr into readable tails."""
+
+    def _launcher(self):
+        config = GameConfig(type="custom", path="/fake", executable="/usr/bin/true")
+        return CustomLauncher(config)
+
+    def _drain(self, launcher, buffer, data: bytes):
+        """Run the drain loop synchronously over an in-memory stream."""
+        launcher._drain_stream(io.BytesIO(data), buffer)
+
+    def test_stdout_tail_captures_lines(self):
+        launcher = self._launcher()
+        self._drain(launcher, launcher._stdout_buffer, b"line one\nline two\n")
+        assert launcher.get_stdout_tail() == "line one\nline two"
+
+    def test_empty_output_returns_none(self):
+        launcher = self._launcher()
+        assert launcher.get_stdout_tail() is None
+        assert launcher.get_stderr_tail() is None
+
+    def test_ring_buffer_bounded_keeps_tail(self):
+        from tester.launcher import _MAX_OUTPUT_LINES
+
+        launcher = self._launcher()
+        payload = "".join(f"line{i}\n" for i in range(_MAX_OUTPUT_LINES + 50))
+        self._drain(launcher, launcher._stderr_buffer, payload.encode())
+        tail = launcher.get_stderr_tail()
+        # Oldest lines evicted; the most recent survive.
+        assert "line0\n" not in tail + "\n"
+        assert tail.endswith(f"line{_MAX_OUTPUT_LINES + 49}")
+
+    def test_tail_truncates_to_max_chars(self):
+        launcher = self._launcher()
+        self._drain(launcher, launcher._stdout_buffer, b"abcdefghij\n")
+        assert launcher.get_stdout_tail(max_chars=3) == "hij"
+
+    def test_decodes_invalid_utf8_without_raising(self):
+        launcher = self._launcher()
+        self._drain(launcher, launcher._stderr_buffer, b"bad \xff byte\n")
+        assert "bad" in launcher.get_stderr_tail()
+
+
+class TestEngineErrorLog:
+    """Ren'Py's traceback.txt is read back only when fresh."""
+
+    def test_renpy_reads_recent_traceback(self, tmp_path):
+        (tmp_path / "traceback.txt").write_text(
+            'Traceback (most recent call last):\n'
+            '  File "game/script.rpy", line 42, in script\n'
+            'Exception: boom\n'
+        )
+        config = GameConfig(type="renpy", path=str(tmp_path), executable="renpy.sh")
+        launcher = RenPyLauncher(config)
+        launcher._launched_at = time.time() - 1  # file is newer than launch
+        log = launcher.read_engine_error_log()
+        assert log is not None
+        assert "game/script.rpy" in log
+
+    def test_renpy_ignores_stale_traceback(self, tmp_path):
+        tb = tmp_path / "traceback.txt"
+        tb.write_text("old crash from a previous run\n")
+        old = time.time() - 3600
+        os.utime(tb, (old, old))
+        config = GameConfig(type="renpy", path=str(tmp_path), executable="renpy.sh")
+        launcher = RenPyLauncher(config)
+        launcher._launched_at = time.time()  # launched after the stale file
+        assert launcher.read_engine_error_log() is None
+
+    def test_renpy_no_traceback_file(self, tmp_path):
+        config = GameConfig(type="renpy", path=str(tmp_path), executable="renpy.sh")
+        launcher = RenPyLauncher(config)
+        launcher._launched_at = time.time()
+        assert launcher.read_engine_error_log() is None
+
+    def test_base_launcher_has_no_engine_log(self):
+        config = GameConfig(type="custom", path="/fake", executable="/usr/bin/true")
+        assert CustomLauncher(config).read_engine_error_log() is None
 
 
 class TestCreateLauncherFactory:
