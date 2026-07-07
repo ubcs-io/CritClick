@@ -45,11 +45,16 @@ class TestUserPrompt:
 
 
 class TestRecapPrompts:
-    def test_recap_system_prompt_includes_next_action_guidance(self):
+    def test_recap_system_prompt_includes_experience_guidance(self):
         prompt = make_recap_system_prompt()
-        assert "next action" in prompt.lower()
+        # Still surfaces the developer takeaway fields.
         assert "next_action" in prompt
         assert "related_steps" in prompt
+        # Now drives a persona-based, in-the-player's-shoes experience review.
+        assert "persona_reviews" in prompt
+        assert "overall_verdict" in prompt
+        assert "Typical player" in prompt
+        assert "penalize" in prompt.lower()
 
     def test_recap_system_prompt_custom_override(self):
         custom = "Summarize this run."
@@ -79,3 +84,26 @@ class TestRecapPrompts:
             step_log="Step 1 [wait]: Nothing\n  Reasoning: idle",
         )
         assert "JSON" in result
+
+    def test_recap_user_prompt_renders_configured_personas(self):
+        result = make_recap_user_prompt(
+            steps_completed=1,
+            completion_reason="completed",
+            duration=1.0,
+            action_counts="none",
+            step_log="Step 1 [done]: end\n  Reasoning: fin",
+            personas=["Speedrunner", "Lore reader"],
+        )
+        assert "1. Speedrunner" in result
+        assert "2. Lore reader" in result
+
+    def test_recap_user_prompt_falls_back_to_typical_player(self):
+        result = make_recap_user_prompt(
+            steps_completed=1,
+            completion_reason="completed",
+            duration=1.0,
+            action_counts="none",
+            step_log="Step 1 [done]: end\n  Reasoning: fin",
+            personas=[],
+        )
+        assert "Typical player" in result

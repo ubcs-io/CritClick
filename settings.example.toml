@@ -22,12 +22,14 @@ max_tokens = 600
 # reasoning_max_tokens = 4096
 # Thinking effort for o-series reasoning models (o1, o3): "low", "medium", or "high".
 # "low" dramatically reduces thinking tokens for simple UI/click tasks.
+# Auto-defaults to "low" for o-series models when unset.
 # Leave unset for non-o-series models; ignored by standard models like gpt-4o.
 # reasoning_effort = "low"
 # Low temperature for deterministic UI interactions
 temperature = 0.1
 # Per-request timeout in seconds. When set, calls exceeding this duration are
-# terminated and retried. Useful to cap runaway thinking on reasoning models.
+# terminated and retried. Caps runaway thinking on reasoning models.
+# Default is 60 s — raise for slow endpoints, set to null to disable entirely.
 # timeout = 60.0
 # Additional parameters to pass directly in the API request body (model-specific
 # options not exposed as top-level config, e.g. vLLM thinking settings).
@@ -36,6 +38,19 @@ temperature = 0.1
 max_retries = 3
 # Base delay in seconds for exponential backoff between retries
 retry_delay = 2.0
+# ---------------------------------------------------------------------------
+# Reasoning / thinking control (keeping LLM calls lean)
+# ---------------------------------------------------------------------------
+# Separate cap on visible output tokens (NOT thinking tokens). When supported
+# by the provider, this is the preferred way to prevent reasoning from stealing
+# the entire budget. When None, max_tokens covers both thinking and output.
+# Set to a small value (e.g. 300) to enforce short answers regardless of
+# thinking depth.
+# max_completion_tokens = 300
+# Adaptive reasoning throttling: when the estimated reasoning-token ratio
+# exceeds this threshold, the harness steps down to a lower max_tokens tier
+# for subsequent calls (600 → 450 → 300 → 200). Set to 1.0 to disable.
+# min_reasoning_ratio = 0.8
 
 [game]
 # Engine type: "renpy", "godot", or "custom"
@@ -73,6 +88,19 @@ headless = false
 wait_duration = 2.0
 # Show a 3-second countdown with failsafe reminder before launching
 startup_countdown = true
+
+[review]
+# Player personas for the end-of-run experience review. Each persona becomes its
+# own section in NEXT_ACTION.md, written in that player's voice, describing how the
+# run would have felt and flagging UX nitpicks (overlapping text, on-screen errors,
+# confusing navigation) with the step numbers where they occurred.
+# Leave empty (or omit this section) to review the run as a single "Typical player".
+# personas = [
+#   "Impatient completionist who rushes and hates dead ends",
+#   "First-time casual player who is easily confused and notices friction",
+#   "Detail-oriented UX critic who flags overlapping text, misalignment, and errors",
+# ]
+personas = []
 
 [logging]
 # Path to structured JSONL log file

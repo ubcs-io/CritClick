@@ -9,6 +9,7 @@ from tester.models import (
     LogEntry,
     NextActionReport,
     NextActionStatus,
+    PersonaReview,
     RecapReport,
 )
 
@@ -79,6 +80,26 @@ class TestActionResponse:
             narrative="x",
         )
         assert resp.coordinates == []
+
+    def test_visual_notes_default_empty(self):
+        # Older logs written before visual_notes existed must still validate.
+        resp = ActionResponse(
+            description="x",
+            action="wait",
+            reasoning="x",
+            narrative="x",
+        )
+        assert resp.visual_notes == ""
+
+    def test_visual_notes_captured(self):
+        resp = ActionResponse(
+            description="Menu",
+            action="wait",
+            reasoning="settle",
+            narrative="waited",
+            visual_notes="Title text overlaps the Start button.",
+        )
+        assert "overlaps" in resp.visual_notes
 
     def test_missing_required_fields(self):
         with pytest.raises(ValidationError):
@@ -153,6 +174,27 @@ class TestNextActionReport:
         assert report.related_steps == []
         assert report.status == NextActionStatus.UNKNOWN
         assert report.severity == "info"
+        assert report.persona_reviews == []
+        assert report.overall_verdict == ""
+
+    def test_persona_reviews_round_trip(self):
+        report = NextActionReport(
+            next_action="Fix overlapping menu text.",
+            persona_reviews=[
+                {
+                    "persona": "Impatient completionist",
+                    "experience": "By step 3 I'm annoyed the title text overlaps.",
+                    "friction": ["Overlapping title text at step 1"],
+                    "sentiment": "frustrated",
+                }
+            ],
+            overall_verdict="Rough menu polish but functional.",
+        )
+        assert isinstance(report.persona_reviews[0], PersonaReview)
+        assert report.persona_reviews[0].sentiment == "frustrated"
+        dumped = report.model_dump(mode="json")
+        assert dumped["persona_reviews"][0]["persona"] == "Impatient completionist"
+        assert dumped["overall_verdict"] == "Rough menu polish but functional."
 
     def test_missing_next_action(self):
         with pytest.raises(ValidationError):

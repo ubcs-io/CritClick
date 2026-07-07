@@ -12,8 +12,9 @@ import logging
 import re
 import time
 from abc import ABC, abstractmethod
+from typing import Any
 
-from .models import ActionResponse, CalibrationResponse
+from .models import ActionResponse, CalibrationResponse, NextActionReport
 
 logger = logging.getLogger("tester.client")
 
@@ -58,13 +59,16 @@ class LLMClient(ABC):
     """Abstract base for vision-capable LLM clients."""
 
     @abstractmethod
-    def analyze(self, image_b64: str, system_prompt: str, user_prompt: str) -> dict:
+    def analyze(self, image_b64: str, system_prompt: str, user_prompt: str,
+                *, max_tokens: int | None = None) -> dict:
         """Send a screenshot + prompts to the LLM and return the parsed response dict.
 
         Args:
             image_b64: Base64-encoded PNG screenshot.
             system_prompt: System-level instruction for the model.
             user_prompt: User message describing the current task/context.
+            max_tokens: Per-call override for the completion budget (set by the
+                harness for adaptive throttling).
 
         Returns:
             A dictionary that should match the ActionResponse schema.
@@ -83,6 +87,22 @@ class LLMClient(ABC):
         """
         ...
 
+    @abstractmethod
+    def summarize(
+        self,
+        image_b64: str,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        max_tokens: int | None = None,
+    ) -> dict:
+        """Produce the end-of-run recap from the playthrough log.
+
+        Returns:
+            A dictionary matching the ``NextActionReport`` schema.
+        """
+        ...
+
 
 class OpenAIClient(LLMClient):
     """Client for any OpenAI-compatible API endpoint.
@@ -95,6 +115,10 @@ class OpenAIClient(LLMClient):
       - LiteLLM proxy       (api_base="http://localhost:4000")
       - Any other OpenAI-compatible server
     """
+
+    # Reasoning model name prefixes that default to effort="low" when not
+    # explicitly configured.
+    _O_SERIES_PREFIXES = ("o1", "o3")
 
     def __init__(
         self,
@@ -110,6 +134,7 @@ class OpenAIClient(LLMClient):
         reasoning_effort: str | None = None,
         timeout: float | None = None,
         extra_body: dict | None = None,
+        max_completion_tokens: int | None = None,
     ):
         if api_key is None:
             logger.info("No API key provided — connecting without authentication.")
@@ -124,8 +149,19 @@ class OpenAIClient(LLMClient):
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.debug_llm = debug_llm
+        self.max_completion_tokens = max_completion_tokens
         self._last_system_prompt: str | None = None
         self._last_user_prompt_skeleton: str | None = None
+
+        # Auto-default reasoning_effort for o-series models.
+        if self.reasoning_effort is None and self._model_is_o_series(model):
+            self.reasoning_effort = "low"
+            logger.info(
+                "🧠 Model '%s' is o-series — defaulting reasoning_effort='low' "
+                "to cap thinking tokens. Override with reasoning_effort='medium' "
+                "or 'high' if the model consistently produces empty output.",
+                model,
+            )
 
         from openai import OpenAI
 
@@ -133,6 +169,11 @@ class OpenAIClient(LLMClient):
         if timeout is not None:
             client_kwargs["timeout"] = timeout
         self._client = OpenAI(**client_kwargs)
+
+    @classmethod
+    def _model_is_o_series(cls, model: str) -> bool:
+        """Check whether *model* is an o-series reasoning model."""
+        return any(model.startswith(prefix) for prefix in cls._O_SERIES_PREFIXES)
 
     def locate_markers(self, image_b64: str, system_prompt: str, user_prompt: str) -> dict:
         """Send the calibration probe image and return located markers.
@@ -145,14 +186,42 @@ class OpenAIClient(LLMClient):
         )
         return self._request(image_b64, system_prompt, user_prompt, response_format)
 
-    def analyze(self, image_b64: str, system_prompt: str, user_prompt: str) -> dict:
+    def analyze(self, image_b64: str, system_prompt: str, user_prompt: str,
+                *, max_tokens: int | None = None) -> dict:
         """Send a vision + text request to the LLM and return structured output.
 
         Retries on transient failures (API errors, invalid JSON) using exponential
         backoff up to ``max_retries`` times.
+
+        Args:
+            max_tokens: Per-call budget override (harness adaptive throttling).
+                When provided, overrides ``self.max_tokens`` for this call only.
         """
         response_format = self._build_response_format()
-        return self._request(image_b64, system_prompt, user_prompt, response_format)
+        return self._request(image_b64, system_prompt, user_prompt, response_format,
+                             max_tokens=max_tokens)
+
+    def summarize(
+        self,
+        image_b64: str,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        max_tokens: int | None = None,
+    ) -> dict:
+        """Produce the end-of-run recap and return structured output.
+
+        Uses the same retrying request machinery as :meth:`analyze` but with the
+        ``NextActionReport`` schema. The persona-based experience review is longer
+        than a per-step action, so callers may pass a larger ``max_tokens`` budget
+        than the per-step default.
+        """
+        response_format = self._build_response_format(
+            NextActionReport, name="playthrough_recap"
+        )
+        return self._request(
+            image_b64, system_prompt, user_prompt, response_format, max_tokens=max_tokens
+        )
 
     def _request(
         self,
@@ -160,8 +229,19 @@ class OpenAIClient(LLMClient):
         system_prompt: str,
         user_prompt: str,
         response_format: dict,
+        *,
+        max_tokens: int | None = None,
     ) -> dict:
-        """Shared vision request loop with retries and structured-JSON parsing."""
+        """Shared vision request loop with retries and structured-JSON parsing.
+
+        Returns a dict with the parsed JSON body plus an optional
+        ``_reasoning_chars`` key (int, the length of the reasoning/thinking
+        trace) so callers can inspect thinking-vs-output ratios.
+
+        Args:
+            max_tokens: Per-call budget override. When None, falls back to
+                ``self.max_tokens``.
+        """
         if self.debug_llm:
             if system_prompt == self._last_system_prompt:
                 logger.info(
@@ -196,12 +276,16 @@ class OpenAIClient(LLMClient):
         # Effective completion budget for this request. Bumped to
         # ``reasoning_max_tokens`` if a reasoning model exhausts the budget on
         # thinking tokens and returns empty content (finish_reason="length").
-        effective_max_tokens = self.max_tokens
+        # A per-call ``max_tokens`` override (e.g. adaptive throttling from the
+        # harness, or the longer recap) wins over the per-step default.
+        effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
 
+        reasoning_chars = 0
         last_exc: Exception | None = None
         for attempt in range(1, self.max_retries + 2):  # +1 for initial attempt
             try:
-                create_kwargs: dict = {
+                reasoning_chars = 0
+                create_kwargs: dict[str, Any] = {
                     "model": self.model,
                     "messages": [
                         {"role": "system", "content": system_prompt},
@@ -227,6 +311,8 @@ class OpenAIClient(LLMClient):
                     create_kwargs["reasoning_effort"] = self.reasoning_effort
                 if self.extra_body is not None:
                     create_kwargs["extra_body"] = self.extra_body
+                if self.max_completion_tokens is not None:
+                    create_kwargs["max_completion_tokens"] = self.max_completion_tokens
 
                 response = self._client.chat.completions.create(**create_kwargs)
             except Exception as exc:
@@ -246,6 +332,7 @@ class OpenAIClient(LLMClient):
             message = choice.message
             raw = message.content
             reasoning = self._extract_reasoning(message)
+            reasoning_chars = len(reasoning) if reasoning else 0
             finish_reason = choice.finish_reason
 
             if self.debug_llm:
@@ -311,7 +398,7 @@ class OpenAIClient(LLMClient):
                 raise last_exc
 
             try:
-                return json.loads(raw)
+                result = json.loads(raw)
             except json.JSONDecodeError as exc:
                 last_exc = exc
                 logger.warning(
@@ -324,6 +411,11 @@ class OpenAIClient(LLMClient):
                     self._sleep_backoff(attempt)
                     continue
                 raise RuntimeError(f"LLM returned invalid JSON after {attempt} attempts: {raw[:200]}…") from exc
+
+            # Attach reasoning metadata so the harness can inspect the
+            # thinking-to-output ratio.
+            result["_reasoning_chars"] = reasoning_chars
+            return result
 
         # Should not reach here, but satisfy type checker
         raise RuntimeError(f"LLM analyze failed: {last_exc}")

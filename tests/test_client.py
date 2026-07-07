@@ -78,7 +78,7 @@ class TestLengthRecovery:
         calls = self._run(client, responses)
 
         result = client._request("img", "sys", "user", {"type": "json_object"})
-        assert result == {"ok": True}
+        assert result == {"ok": True, "_reasoning_chars": 0}
         assert [c["max_tokens"] for c in calls] == [600, 4096]
 
     def test_fails_fast_without_reasoning_budget(self):

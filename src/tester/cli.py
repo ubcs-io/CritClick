@@ -638,6 +638,7 @@ def main(argv: list[str] | None = None) -> None:
         max_retries=settings.llm.max_retries,
         retry_delay=settings.llm.retry_delay,
         debug_llm=args.debug_llm,
+        max_completion_tokens=settings.llm.max_completion_tokens,
     )
 
     # Instantiate launcher (skip in dry-run)

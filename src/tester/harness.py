@@ -114,6 +114,14 @@ class Harness:
         self._recovery_strategies: list[str] = []
         self._window_tracker: WindowTracker | None = None
 
+        # Adaptive reasoning throttling — tightens max_tokens per-call when
+        # the model burns budget on thinking without producing content.
+        self._effective_max_tokens: int = settings.llm.max_tokens
+        self._reasoning_penalties: int = 0
+        # Step-down sequence: each penalty shrinks the budget by one tier.
+        # Once at the floor, no further tightening.
+        _BUDGET_TIERS = (600, 450, 300, 200)
+
         # Captured at run start, written into the manifest
         self._git_info: dict | None = None
         self._exit_code: int | None = None
@@ -590,14 +598,22 @@ class Harness:
         system_prompt = make_system_prompt(self.settings.system_prompt)
         user_prompt = make_user_prompt(context_str, self.settings.user_prompt_template)
 
-        # 3. Analyse via LLM (timed)
+        # 3. Analyse via LLM (timed), with the current adaptively-throttled budget.
         llm_start = time.time()
         try:
-            raw = self.llm.analyze(image_b64, system_prompt, user_prompt)
+            raw = self.llm.analyze(
+                image_b64, system_prompt, user_prompt,
+                max_tokens=self._effective_max_tokens,
+            )
         except RuntimeError as exc:
             logger.error("Step %d/%d | 💥 LLM call failed: %s", self.step, self.settings.harness.max_steps, exc)
             return "unknown"
         duration_ms = int((time.time() - llm_start) * 1000)
+
+        # 3.5 Adaptive reasoning throttling — after a successful response,
+        # check the reasoning-to-output ratio and tighten the budget if the
+        # model spent most of its allowance on thinking tokens.
+        self._apply_reasoning_throttle(raw)
 
         # 4. Validate with Pydantic
         try:
@@ -638,6 +654,65 @@ class Harness:
 
         # 8. Execute
         return self._execute(response)
+
+    # ------------------------------------------------------------------
+    # Adaptive reasoning throttling
+    # ------------------------------------------------------------------
+
+    def _apply_reasoning_throttle(self, raw: dict) -> None:
+        """Tighten the per-call token budget when the model burns budget on thinking.
+
+        Reads ``_reasoning_chars`` from the raw LLM response dict (set by
+        ``OpenAIClient._request``). When the reasoning-trace length exceeds
+        the ``min_reasoning_ratio`` threshold of the current budget, the
+        harness steps down to the next lower budget tier for subsequent calls.
+
+        This creates a negative feedback loop: overthinking → smaller budget →
+        less room to think → faster decisions.
+        """
+
+        # Approximate token count from character count (rough: 4 chars ≈ 1 token).
+        reasoning_chars = raw.get("_reasoning_chars", 0)
+        if reasoning_chars <= 0:
+            return
+
+        # Rough token estimate: ~4 chars per token.
+        reasoning_tokens_est = max(1, reasoning_chars // 4)
+        budget = max(self._effective_max_tokens, 1)
+        ratio = reasoning_tokens_est / budget
+
+        threshold = self.settings.llm.min_reasoning_ratio
+        if ratio < threshold:
+            return
+
+        # Step down through the budget tiers.
+        tiers = [600, 450, 300, 200]
+        current = self._effective_max_tokens
+        # Find the next lower tier (skip tiers that are >= current).
+        next_budget = None
+        for t in tiers:
+            if t < current:
+                next_budget = t
+                break
+
+        if next_budget is None:
+            # Already at the floor — nothing more we can do.
+            return
+
+        self._effective_max_tokens = next_budget
+        self._reasoning_penalties += 1
+        logger.warning(
+            "🧠 Step %d/%d | Reasoning throttling: ~%d reasoning tokens "
+            "exceed %.0f%% of the %d-token budget — tightening to %d tokens "
+            "(penalty #%d).",
+            self.step,
+            self.settings.harness.max_steps,
+            reasoning_tokens_est,
+            threshold * 100,
+            current,
+            next_budget,
+            self._reasoning_penalties,
+        )
 
     # ------------------------------------------------------------------
     # Action execution

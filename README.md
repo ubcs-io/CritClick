@@ -240,7 +240,8 @@ tester --report playthrough_log.jsonl
 
 ### Run Summary
 
-At the end of every run, the harness prints a summary:
+At the end of every run, the harness prints a summary followed by a player-experience
+verdict and the single most important developer next action:
 
 ```
 ============================================================
@@ -252,7 +253,39 @@ At the end of every run, the harness prints a summary:
   Actions         : click=18, press=12, wait=8, done=1, type=3
   Log file        : playthrough_log.jsonl
 ============================================================
+
+============================================================
+🎭 PLAYER EXPERIENCE:
+   Flows well overall, but the main menu feels unpolished — overlapping
+   title text at step 2 and a dead-end options screen at step 9.
+------------------------------------------------------------
+➡️  NEXT ACTION:  (step 2)
+   Fix the overlapping title text on the main menu.
+============================================================
 ```
+
+### Player-experience review (personas)
+
+Each run's `NEXT_ACTION.md` includes a **Player Experience Review**: an LLM analyst
+replays the logged action→outcome pairs and per-step visual notes and writes, in the
+player's shoes, how the run would have *felt* — flagging UX nitpicks (overlapping or
+truncated text, on-screen non-fatal errors, clipped UI, confusing navigation, dead ends)
+with the step numbers where they occurred.
+
+Configure the player personas it reviews from in your `settings.toml`:
+
+```toml
+[review]
+personas = [
+  "Impatient completionist who rushes and hates dead ends",
+  "First-time casual player who is easily confused and notices friction",
+  "Detail-oriented UX critic who flags overlapping text, misalignment, and errors",
+]
+```
+
+Each persona becomes its own section, written in that player's voice, plus an overall
+verdict. Leave `personas` empty (or omit `[review]`) to review the run as a single
+"Typical player".
 
 ---
 

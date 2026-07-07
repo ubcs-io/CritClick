@@ -89,17 +89,19 @@ class LLMSettings(BaseModel):
         description=(
             "Thinking effort level for o-series reasoning models (o1, o3). "
             "One of 'low', 'medium', 'high'. 'low' dramatically reduces thinking "
-            "token usage for simple UI/click tasks. Leave unset for non-o-series "
-            "models. Ignored by standard models like gpt-4o."
+            "token usage for simple UI/click tasks. When unset and the model name "
+            "starts with 'o1' or 'o3', defaults to 'low' automatically. "
+            "Ignored by standard models like gpt-4o."
         ),
     )
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     timeout: float | None = Field(
-        default=None, ge=1.0,
+        default=60.0, ge=1.0,
         description=(
             "Per-request timeout in seconds. When set, a call that exceeds this "
-            "duration is terminated and retried. Useful to cap runaway thinking "
-            "on reasoning models. Leave unset for no timeout."
+            "duration is terminated and retried. Caps runaway thinking on "
+            "reasoning models. Defaults to 60 s; set to null (None) to disable "
+            "the timeout entirely."
         ),
     )
     extra_body: dict | None = Field(
@@ -117,6 +119,26 @@ class LLMSettings(BaseModel):
     retry_delay: float = Field(
         default=2.0, ge=0.0,
         description="Base delay in seconds for exponential backoff between retries.",
+    )
+    max_completion_tokens: int | None = Field(
+        default=None, ge=1, le=16384,
+        description=(
+            "If supported by the provider, caps only the visible output tokens "
+            "(not thinking/reasoning tokens). This is the preferred mechanism "
+            "for reasoning models because it prevents thinking from stealing "
+            "the entire max_tokens budget. When None, max_tokens is used as a "
+            "combined cap for thinking + output. Set this to a small value "
+            "(e.g. 300) to enforce short answers regardless of thinking depth."
+        ),
+    )
+    min_reasoning_ratio: float = Field(
+        default=0.8, ge=0.0, le=1.0,
+        description=(
+            "When the ratio of reasoning tokens to the max_tokens budget exceeds "
+            "this threshold, the harness tightens max_tokens for subsequent "
+            "calls (adaptive throttling). Set to 1.0 to disable throttling. "
+            "Only relevant for reasoning models that return thinking traces."
+        ),
     )
     block_external_routing: bool = Field(
         default=False,
@@ -261,6 +283,25 @@ class LoggingSettings(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Review / recap settings
+# ---------------------------------------------------------------------------
+
+class ReviewSettings(BaseModel):
+    """Controls the end-of-run, persona-driven player-experience review."""
+
+    personas: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Player personas to review each run from. Each becomes one section in "
+            "the experience review, written in that persona's voice (e.g. "
+            "'Impatient completionist who hates dead ends', 'First-time casual who "
+            "is easily confused'). When empty, the run is reviewed as a single "
+            "'Typical player'."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Top-level settings
 # ---------------------------------------------------------------------------
 
@@ -277,6 +318,7 @@ class Settings(BaseSettings):
     game: GameConfig
     harness: HarnessSettings = Field(default_factory=HarnessSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
+    review: ReviewSettings = Field(default_factory=ReviewSettings)
 
     # Prompt overrides (optional — use defaults if omitted)
     system_prompt: str | None = Field(

@@ -89,6 +89,14 @@ class ActionResponse(BaseModel):
         description="In-character or descriptive narrative of what happened this step, "
         "written in present tense (e.g. '💬 Character greets the player.').",
     )
+    visual_notes: str = Field(
+        default="",
+        description="Visual-layout and readability defects visible on this frame, from a "
+        "player's-eye view: overlapping or truncated text, elements clipped or running off "
+        "screen, low-contrast/unreadable text, misaligned or awkwardly-spaced UI, and on-screen "
+        "error banners or tracebacks that did NOT crash the game. Note anything that would make a "
+        "real player wince. Leave as an empty string when the frame looks clean and well laid out.",
+    )
 
 
 class MarkerLocation(BaseModel):
@@ -119,6 +127,36 @@ class NextActionStatus(str, Enum):
     COMPLETED = "completed"
     INTERRUPTED = "interrupted"
     UNKNOWN = "unknown"
+
+
+class PersonaReview(BaseModel):
+    """How one player persona would have felt playing through the run.
+
+    Produced by the recap LLM, one per configured persona (or a single
+    ``"Typical player"`` entry when no personas are configured).
+    """
+
+    persona: str = Field(
+        ...,
+        description="The persona this review is written from (e.g. 'Impatient completionist').",
+    )
+    experience: str = Field(
+        ...,
+        description="A 2-4 sentence, present-tense account of how this persona would FEEL "
+        "playing through the run — written in their voice, referencing specific step numbers "
+        "for the moments that shaped the experience (e.g. 'By step 6 I'm frustrated ...').",
+    )
+    friction: list[str] = Field(
+        default_factory=list,
+        description="Specific friction points and nitpicks this persona would notice, each "
+        "citing the step number(s) where it occurred (e.g. 'Overlapping title text at step 2', "
+        "'Dead-end menu with no visible back button at step 9').",
+    )
+    sentiment: str = Field(
+        default="mixed",
+        description="One-word overall sentiment for this persona: 'delighted', 'satisfied', "
+        "'mixed', 'frustrated', or 'confused'.",
+    )
 
 
 class NextActionReport(BaseModel):
@@ -153,6 +191,16 @@ class NextActionReport(BaseModel):
     related_steps: list[int] = Field(
         default_factory=list,
         description="Playthrough step numbers the issue spans or was encountered at.",
+    )
+    persona_reviews: list[PersonaReview] = Field(
+        default_factory=list,
+        description="Per-persona accounts of how the run would have felt to play, one entry "
+        "per configured persona (or a single 'Typical player' entry when none are configured).",
+    )
+    overall_verdict: str = Field(
+        default="",
+        description="A blended, plain-language verdict on the overall player experience across "
+        "personas — what worked, what would make a player wince, and how polished the run felt.",
     )
     status: NextActionStatus = Field(
         default=NextActionStatus.UNKNOWN,
