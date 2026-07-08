@@ -32,7 +32,10 @@ Available actions:
 - "wait"    — Pause and wait for animations, scene transitions, or dialogue to complete
 - "type"    — Type text into an input field (provide the text in text_to_type)
 - "press"   — Press a single key (provide the key name in key_to_press, e.g. 'enter', 'escape', 'space')
+- "advance" — Fast-forward plain dialogue/narration. Use ONLY when the screen is just story text that continues on click or Space and there is NO meaningful choice or button to weigh. The harness will repeat the advance for you until the screen changes structurally (a choice, menu, or new scene), so you don't need to click through every line yourself. Leave candidates empty.
 - "done"    — The game has reached a natural end point (credits, game over, or main menu)
+
+WHEN TO USE "advance" vs "click": If the ONLY sensible next step is "continue the dialogue", choose "advance". If there is a choice to make, a button to press, or any decision, choose "click" (or the appropriate action) instead — never "advance" past a decision point.
 
 CRITICAL — TARGETING FOR "click" ACTIONS:
 - You MUST provide "bounding_box": [x1, y1, x2, y2] — the system clicks the center automatically.

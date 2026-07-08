@@ -88,6 +88,48 @@ headless = false
 wait_duration = 2.0
 # Show a 3-second countdown with failsafe reminder before launching
 startup_countdown = true
+# ---------------------------------------------------------------------------
+# Save / resume support (--save-id CLI flag)
+# ---------------------------------------------------------------------------
+# When --save-id <ID> is passed on the command line, the harness will:
+#   1. At startup, load a previous session's state from runs/<ID>/save_state.json
+#      (if it exists) and resume the playthrough where it left off.
+#   2. At max_steps - save_before_end_steps, inject a hint into the LLM prompt
+#      telling it to click the in-game Save / Save Game button.
+#   3. After the save step executes, serialize harness internals to
+#      runs/<ID>/save_state.json and stop cleanly.
+# Multiple runs using the same --save-id thread together, accumulating step
+# history and action counts across runs.
+# How many steps before max_steps to trigger the save sequence. At step
+# (max_steps - save_before_end_steps), the harness injects a save hint into
+# the prompt; after executing that step's action, it saves state and stops.
+save_before_end_steps = 2
+# ---------------------------------------------------------------------------
+# Frame-change detection — cut VLM calls without ever acting blind
+# ---------------------------------------------------------------------------
+# A cheap grayscale-thumbnail diff (0.0 = identical, 1.0 = maximally different)
+# lets the harness skip VLM calls on frames that don't need a fresh decision.
+# Every speculative action is still gated by observing the resulting frame.
+# Below this delta, two frames are treated as identical ("no effect" / settled).
+frame_change_min_delta = 0.02
+# At/above this delta, a change is "structural" (new screen/choice/scene) and
+# triggers a fresh VLM look. Between the two, changes are "minor" (dialogue rolling).
+frame_change_structural_delta = 0.20
+# Key pressed to advance dialogue when the model returns action="advance".
+advance_key = "space"
+# Seconds between frame captures while advancing / polling for stability.
+advance_poll_interval = 0.3
+# Max dialogue-advance inputs per "advance" decision before returning to the VLM.
+# Keep modest so the harness re-parses periodically instead of skipping a whole scene.
+advance_max_repeats = 4
+# Consecutive "no change" polls that end an advance/wait early.
+advance_stable_polls = 2
+# When a click leaves the screen unchanged, try the next ranked candidate from the
+# same VLM response before spending a new VLM call (falls back to stuck recovery).
+candidate_fallback = true
+# Save intermediate advance-macro frames to the screenshot dir so visual-defect
+# coverage isn't lost on frames that skipped the VLM look.
+save_macro_frames = true
 
 [review]
 # Player personas for the end-of-run experience review. Each persona becomes its

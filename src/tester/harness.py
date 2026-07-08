@@ -23,11 +23,14 @@ from .config import Settings
 from .launcher import Launcher, capture_git_info
 from .models import (
     ActionResponse,
+    ActionType,
     CalibrationResponse,
     LogEntry,
     NextActionReport,
     NextActionStatus,
+    SaveState,
 )
+from .perception import classify_change, frame_delta, frame_signature
 from .prompts import (
     make_calibration_system_prompt,
     make_calibration_user_prompt,
@@ -78,6 +81,7 @@ class Harness:
         runs_dir: str | Path = "runs",
         debug_harness: bool = False,
         debug_screen: bool = False,
+        save_id: str | None = None,
     ) -> None:
         self.settings = settings
         self.launcher = launcher
@@ -85,6 +89,7 @@ class Harness:
         self.dry_run = dry_run
         self.debug_harness = debug_harness
         self.debug_screen = debug_screen
+        self.save_id = save_id
         self.capturer = Capturer(
             scale=settings.harness.screen_scale,
             debug=debug_screen,
@@ -113,6 +118,12 @@ class Harness:
         self._recovery_attempts = 0
         self._recovery_strategies: list[str] = []
         self._window_tracker: WindowTracker | None = None
+        # Count of advance-macro frames saved this step (for unique filenames).
+        self._macro_frame_seq = 0
+
+        # Save/resume state — tracks cumulative progress across threaded runs.
+        self._total_steps_across_runs: int = 0
+        self._save_triggered: bool = False
 
         # Adaptive reasoning throttling — tightens max_tokens per-call when
         # the model burns budget on thinking without producing content.
@@ -316,6 +327,16 @@ class Harness:
         logger.info("🎮 Starting autonomous vision-based playthrough…")
         self.start_time = time.time()
 
+        # If a save_id was provided, try to resume from a previous session.
+        # This must happen before the git-info capture so the manifest
+        # reflects this run's start state correctly.
+        if self.save_id:
+            self._load_save_state()
+            logger.info(
+                "💾 Save/resume active | save_id=%s | starting at step %d",
+                self.save_id, self.step + 1,
+            )
+
         # Capture git state of the game repo at run start for the manifest.
         # Done before pull_latest() so the manifest reflects what was tested.
         try:
@@ -380,6 +401,17 @@ class Harness:
                     self.completion_reason = "completed"
                     break
 
+                # When the save-trigger step has executed, stop the loop cleanly.
+                # The harness state will be serialised in the finally block.
+                if self._save_triggered:
+                    logger.info(
+                        "💾 Save step executed at step %d — stopping run cleanly. "
+                        "State will be saved for the next run with --save-id=%s.",
+                        self.step, self.save_id,
+                    )
+                    self.completion_reason = "saved"
+                    break
+
                 time.sleep(self.settings.harness.wait_after_action)
             else:
                 self.completion_reason = "max_steps_reached"
@@ -406,6 +438,11 @@ class Harness:
             self._log_summary(report)
             self._write_next_action(report)
             self._write_manifest(next_action=report)
+            # Write the save-state file if this was a save-enabled session.
+            # The state captures the last completed step so the next run
+            # resumes from step+1.
+            if self.save_id and self.step > 0:
+                self._write_save_state()
 
         return exit_code
 
@@ -609,7 +646,36 @@ class Harness:
                 f"These attempts appear to have had no effect. Pick a DIFFERENT action "
                 f"or target a DIFFERENT element. Do NOT repeat the last action.\n"
             )
-        context_str = context_str + stuck_warning
+        # Inject a save-reminder hint when approaching the save-trigger step.
+        # This gives the LLM one full step's context to navigate to the save
+        # screen before the actual save-trigger step fires.
+        save_hint = ""
+        if self.save_id and not self._save_triggered:
+            if self.step == self._save_trigger_step - 1:
+                # One step before — hint that a save is coming.
+                save_hint = (
+                    "\n\n💾 SAVE-PHASE NOTICE: The next step will be the final action "
+                    "before this session pauses. Navigate towards a screen where you "
+                    "can click a Save / Save Game option. You do not need to save yet — "
+                    "just get close to the save UI.\n"
+                )
+            elif self.step == self._save_trigger_step:
+                # This is the save step — explicitly request clicking the save UI.
+                save_hint = (
+                    "\n\n💾 SAVE-PHASE ACTION: This is the last action before this "
+                    "session saves its state and stops. Click the Save / Save Game "
+                    "button (or equivalent) now to preserve the in-game progress. "
+                    "After this step the harness will serialize its state and cleanly "
+                    "stop, resuming from this point on the next run with the same --save-id.\n"
+                )
+        context_str = context_str + stuck_warning + save_hint
+
+        # Mark the save as triggered *before* the LLM call so the prompt
+        # injection only fires once. If the LLM call fails at the save step,
+        # we still flag it to avoid re-triggering on a retry/crash recovery.
+        if save_hint and self.step == self._save_trigger_step:
+            self._save_triggered = True
+
         system_prompt = make_system_prompt(self.settings.system_prompt)
         user_prompt = make_user_prompt(context_str, self.settings.user_prompt_template)
 
@@ -798,13 +864,16 @@ class Harness:
             wait_time = self.settings.harness.wait_duration
             if self.debug_harness:
                 logger.info(
-                    "🔍 [DEBUG-HARNESS] Step %d/%d | Action 'wait' → sleeping %.1fs",
+                    "🔍 [DEBUG-HARNESS] Step %d/%d | Action 'wait' → polling up to %.1fs for stability",
                     self.step, self.settings.harness.max_steps, wait_time,
                 )
-            logger.info("Step %d/%d | ⏳ Waiting %ss for scene to stabilise…", self.step, self.settings.harness.max_steps, wait_time)
+            logger.info("Step %d/%d | ⏳ Waiting up to %ss for scene to stabilise…", self.step, self.settings.harness.max_steps, wait_time)
             if not self.dry_run:
-                time.sleep(wait_time)
+                self._wait_until_stable(wait_time)
             return "waited"
+
+        if action == "advance":
+            return self._advance_macro(response)
 
         if action == "click":
             # Resolve click target: bounding_box centre
@@ -818,54 +887,16 @@ class Harness:
                 logger.warning("Step %d/%d | ⚠️  'click' action without bounding_box — skipping.", self.step, self.settings.harness.max_steps)
                 return "unknown"
 
-            if self.debug_harness:
-                logger.info(
-                    "🔍 [DEBUG-HARNESS] Step %d/%d | Action 'click' | target=%s | raw=(%.1f, %.1f) | capturer.scale=%.4f",
-                    self.step, self.settings.harness.max_steps,
-                    target_source, raw_x, raw_y, self.capturer.scale,
-                )
+            # Capture a cheap signature of the screen *before* the click so we
+            # can verify the click actually did something, and fall back to the
+            # model's other ranked candidates if it didn't — all without a new
+            # VLM call. Returns None in dry-run or when capture is unavailable.
+            pre_sig = self._capture_signature()
 
-            x, y = self.capturer.scale_coordinates(raw_x, raw_y)
-
-            if self.debug_harness:
-                screen_w, screen_h = pyautogui.size()
-                logger.info(
-                    "🔍 [DEBUG-HARNESS] Step %d/%d | Scaled coords: (%d, %d) | screen: %dx%d",
-                    self.step, self.settings.harness.max_steps, x, y, screen_w, screen_h,
-                )
-
-            # Bounds validation
-            if not self._validate_coordinates(x, y):
-                screen_w, screen_h = pyautogui.size()
-                if self.debug_harness:
-                    logger.warning(
-                        "🔍 [DEBUG-HARNESS] Step %d/%d | BOUNDS CHECK FAILED: (%d, %d) outside screen %dx%d (±50 margin)",
-                        self.step, self.settings.harness.max_steps, x, y, screen_w, screen_h,
-                    )
-                logger.warning(
-                    "Step %d/%d | ⚠️  Click coordinates (%d, %d) are outside expected screen bounds — skipping.",
-                    self.step,
-                    self.settings.harness.max_steps,
-                    x, y,
-                )
+            if not self._perform_click(raw_x, raw_y, target_source):
                 return "unknown"
 
-            if self.debug_harness:
-                logger.info(
-                    "🔍 [DEBUG-HARNESS] Step %d/%d | Bounds check passed — proceeding with click (%s)",
-                    self.step, self.settings.harness.max_steps, target_source,
-                )
-
-            if not self.dry_run:
-                self.capturer.click(x, y)
-                logger.info("Step %d/%d | 🖱️  Clicked (%d, %d) [scale=%.2f, %s]", self.step, self.settings.harness.max_steps, x, y, self.capturer.scale, target_source)
-            else:
-                logger.info("Step %d/%d | 🔍 [DRY RUN] Would click (%d, %d) [%s]", self.step, self.settings.harness.max_steps, x, y, target_source)
-            # Feed the actual click coordinates back to the LLM context
-            # so it can self-correct if clicks are landing in the wrong place.
-            self.step_history.append(
-                f"  ↳ Click executed at absolute screen coordinates ({x}, {y}) [{target_source}]."
-            )
+            self._verify_click_or_fallback(response, pre_sig, (raw_x, raw_y))
             return "clicked"
 
         if action == "type":
@@ -902,6 +933,262 @@ class Harness:
         logger.warning("Step %d/%d | ⚠️  Unknown action: %s", self.step, self.settings.harness.max_steps, action)
         return "unknown"
 
+    # ------------------------------------------------------------------
+    # Frame-change detection helpers (VLM-call reduction, verify-gated)
+    # ------------------------------------------------------------------
+
+    def _capture_signature(self):
+        """Capture the current frame and return its cheap change-signature.
+
+        Returns ``None`` in dry-run, or whenever a real ``PIL.Image`` cannot be
+        produced (e.g. a mocked capturer in tests) so callers transparently
+        skip verification rather than acting on a bogus comparison.
+        """
+        if self.dry_run:
+            return None
+        try:
+            img = self.capturer.capture_pil()
+            sig = frame_signature(img)
+        except Exception:
+            return None
+        return sig if isinstance(sig, Image.Image) else None
+
+    def _frame_changed_since(self, pre_sig) -> bool:
+        """Poll a few times for the screen to differ from *pre_sig*.
+
+        Gives the game a moment to respond after an input. Returns ``True`` as
+        soon as a captured frame exceeds ``frame_change_min_delta`` from
+        *pre_sig*; ``False`` if it stays unchanged across
+        ``advance_stable_polls`` (+1) polls. When a frame can't be captured we
+        conservatively report ``True`` (assume it changed) so we don't fire
+        spurious fallback clicks.
+        """
+        h = self.settings.harness
+        interval = h.advance_poll_interval
+        for _ in range(h.advance_stable_polls + 1):
+            if interval > 0:
+                time.sleep(interval)
+            sig = self._capture_signature()
+            if sig is None:
+                return True
+            if frame_delta(pre_sig, sig) >= h.frame_change_min_delta:
+                return True
+        return False
+
+    def _verify_click_or_fallback(self, response: ActionResponse, pre_sig, attempted) -> None:
+        """Confirm a click had an effect; else try the next ranked candidate.
+
+        The model already enumerates up to three ranked ``candidates`` per
+        frame. When the chosen click leaves the screen unchanged, we walk that
+        existing list and try the next click-type candidate — reusing work
+        we've already paid for instead of spending a fresh VLM call. Only when
+        every candidate is exhausted does control return to the caller (which
+        proceeds to stuck recovery / a new VLM parse on the next step).
+        """
+        h = self.settings.harness
+        if pre_sig is None or not h.candidate_fallback:
+            return
+        if self._frame_changed_since(pre_sig):
+            return  # the click worked — nothing to do
+
+        attempted_pts = [attempted]
+        for cand in response.candidates:
+            if cand.action != ActionType.CLICK:
+                continue
+            cb = cand.bbox
+            if cb is None or len(cb) != 4:
+                continue
+            cx = (cb[0] + cb[2]) / 2.0
+            cy = (cb[1] + cb[3]) / 2.0
+            # Skip candidates whose centre coincides with one we've already tried.
+            if any(abs(cx - px) < 5 and abs(cy - py) < 5 for px, py in attempted_pts):
+                continue
+            logger.info(
+                "Step %d/%d | 🎯 Click had no visible effect — trying next candidate '%s' (no new VLM call).",
+                self.step, self.settings.harness.max_steps, cand.label,
+            )
+            if not self._perform_click(cx, cy, f"candidate '{cand.label}'"):
+                continue
+            attempted_pts.append((cx, cy))
+            if self._frame_changed_since(pre_sig):
+                logger.info(
+                    "Step %d/%d | ✅ Recovered via candidate '%s'.",
+                    self.step, self.settings.harness.max_steps, cand.label,
+                )
+                return
+        logger.info(
+            "Step %d/%d | ⚠️  No ranked candidate changed the screen — deferring to recovery / next VLM parse.",
+            self.step, self.settings.harness.max_steps,
+        )
+
+    def _perform_click(self, raw_x: float, raw_y: float, target_source: str) -> bool:
+        """Scale, bounds-check and execute a single click at model-space coords.
+
+        Returns ``True`` if the click was issued (or would be, in dry-run),
+        ``False`` if the coordinates fell outside the screen and were skipped.
+        Shared by the primary click path and candidate fallback.
+        """
+        if self.debug_harness:
+            logger.info(
+                "🔍 [DEBUG-HARNESS] Step %d/%d | Click | target=%s | raw=(%.1f, %.1f) | capturer.scale=%.4f",
+                self.step, self.settings.harness.max_steps,
+                target_source, raw_x, raw_y, self.capturer.scale,
+            )
+
+        x, y = self.capturer.scale_coordinates(raw_x, raw_y)
+
+        if not self._validate_coordinates(x, y):
+            screen_w, screen_h = pyautogui.size()
+            logger.warning(
+                "Step %d/%d | ⚠️  Click coordinates (%d, %d) are outside expected screen bounds — skipping.",
+                self.step, self.settings.harness.max_steps, x, y,
+            )
+            return False
+
+        if not self.dry_run:
+            self.capturer.click(x, y)
+            logger.info("Step %d/%d | 🖱️  Clicked (%d, %d) [scale=%.2f, %s]", self.step, self.settings.harness.max_steps, x, y, self.capturer.scale, target_source)
+        else:
+            logger.info("Step %d/%d | 🔍 [DRY RUN] Would click (%d, %d) [%s]", self.step, self.settings.harness.max_steps, x, y, target_source)
+        # Feed the actual click coordinates back to the LLM context so it can
+        # self-correct if clicks are landing in the wrong place.
+        self.step_history.append(
+            f"  ↳ Click executed at absolute screen coordinates ({x}, {y}) [{target_source}]."
+        )
+        return True
+
+    def _wait_until_stable(self, ceiling: float) -> None:
+        """Poll until the screen settles, capped at *ceiling* seconds.
+
+        Replaces a fixed sleep: returns early once the frame stops changing
+        (``advance_stable_polls`` consecutive sub-threshold polls) so fast
+        scenes don't over-wait, while slow ones aren't parsed mid-animation.
+        Falls back to sleeping the remaining time if frames can't be captured.
+        """
+        h = self.settings.harness
+        interval = h.advance_poll_interval if h.advance_poll_interval > 0 else 0.3
+        deadline = time.time() + ceiling
+        prev_sig = self._capture_signature()
+        stable = 0
+        while time.time() < deadline:
+            time.sleep(interval)
+            sig = self._capture_signature()
+            if prev_sig is None or sig is None:
+                remaining = deadline - time.time()
+                if remaining > 0:
+                    time.sleep(remaining)
+                return
+            if frame_delta(prev_sig, sig) < h.frame_change_min_delta:
+                stable += 1
+                if stable >= h.advance_stable_polls:
+                    return
+            else:
+                stable = 0
+            prev_sig = sig
+
+    def _advance_macro(self, response: ActionResponse) -> str:
+        """Fast-forward plain dialogue with per-repeat frame verification.
+
+        One ``advance`` decision from the model collapses into several advance
+        inputs here, so the harness doesn't pay a full VLM round-trip per line.
+        Each repeat is verify-gated: we keep going only while the frame keeps
+        changing in a text-only ('minor') way, and stop the moment it changes
+        structurally (a choice/scene → hand back to the VLM) or stops changing.
+        Intermediate frames are still saved for visual-defect coverage.
+        """
+        h = self.settings.harness
+        key = h.advance_key
+
+        if self.dry_run:
+            logger.info(
+                "Step %d/%d | 🔍 [DRY RUN] Would advance dialogue (press '%s', up to %d×).",
+                self.step, self.settings.harness.max_steps, key, h.advance_max_repeats,
+            )
+            return "advanced"
+
+        self._macro_frame_seq = 0
+        prev_sig = self._capture_signature()
+        progressed = 0
+        stable = 0
+        for i in range(h.advance_max_repeats):
+            pyautogui.press(key)
+            if h.advance_poll_interval > 0:
+                time.sleep(h.advance_poll_interval)
+            cur_img, cur_sig = self._capture_frame_and_sig()
+            if h.save_macro_frames and cur_img is not None:
+                self._save_macro_frame(cur_img)
+
+            if prev_sig is None or cur_sig is None:
+                # Can't verify — issue a single advance and hand back to the VLM.
+                break
+
+            change = classify_change(
+                frame_delta(prev_sig, cur_sig),
+                h.frame_change_min_delta,
+                h.frame_change_structural_delta,
+            )
+            if change == "structural":
+                logger.info(
+                    "Step %d/%d | ⏩ Advance: structural change after %d step(s) — new decision point, handing back to VLM.",
+                    self.step, self.settings.harness.max_steps, i + 1,
+                )
+                break
+            if change == "none":
+                stable += 1
+                if stable >= h.advance_stable_polls:
+                    logger.info(
+                        "Step %d/%d | ⏩ Advance: screen settled after %d step(s) — dialogue ended, handing back to VLM.",
+                        self.step, self.settings.harness.max_steps, i + 1,
+                    )
+                    break
+            else:  # "minor" — dialogue still rolling
+                stable = 0
+                progressed += 1
+            prev_sig = cur_sig
+
+        logger.info(
+            "Step %d/%d | ⏩ Advance macro fast-forwarded %d dialogue line(s).",
+            self.step, self.settings.harness.max_steps, progressed,
+        )
+        # Advancing dialogue is legitimate repetition — don't let it trip the
+        # stuck detector when it actually made progress.
+        if progressed > 0:
+            self.stuck_counter = 0
+        return "advanced"
+
+    def _capture_frame_and_sig(self):
+        """Capture the current frame, returning ``(image, signature)``.
+
+        Both are ``None`` in dry-run or when a real image can't be captured.
+        Used by the advance macro so a single capture serves both the change
+        check and the saved-frame fidelity record.
+        """
+        if self.dry_run:
+            return None, None
+        try:
+            img = self.capturer.capture_pil()
+            sig = frame_signature(img)
+        except Exception:
+            return None, None
+        if not isinstance(sig, Image.Image):
+            return None, None
+        return img, sig
+
+    def _save_macro_frame(self, img: Image.Image) -> None:
+        """Persist an intermediate advance-macro frame for defect coverage."""
+        try:
+            screenshot_dir = self.settings.logging.screenshot_dir
+            os.makedirs(screenshot_dir, exist_ok=True)
+            run_prefix = self.run_id[:5]
+            filename = f"{run_prefix}_step_{self.step:04d}_adv_{self._macro_frame_seq:02d}.png"
+            img.save(os.path.join(screenshot_dir, filename))
+            self._macro_frame_seq += 1
+        except Exception as exc:
+            logger.warning(
+                "Step %d/%d | ⚠️  Failed to save advance-macro frame: %s",
+                self.step, self.settings.harness.max_steps, exc,
+            )
+
     def _validate_coordinates(self, x: int, y: int) -> bool:
         """Check whether coordinates fall within the expected screen region.
 
@@ -917,6 +1204,119 @@ class Harness:
         # Allow a small margin for edge clicks
         margin = 50
         return (-margin <= x <= screen_w + margin) and (-margin <= y <= screen_h + margin)
+
+    # ------------------------------------------------------------------
+    # Save / resume state
+    # ------------------------------------------------------------------
+
+    @property
+    def _save_trigger_step(self) -> int:
+        """The step number at which the harness should inject the save prompt.
+
+        Computed as ``max_steps - save_before_end_steps``, clamped to >= 1.
+        """
+        offset = self.settings.harness.save_before_end_steps
+        return max(1, self.settings.harness.max_steps - offset)
+
+    def _save_state_path(self) -> Path:
+        """Return the path to the save-state file for this session."""
+        return self.runs_dir / self.save_id / "save_state.json"  # type: ignore[operator]
+
+    def _load_save_state(self) -> bool:
+        """Load a previous session's state from disk and restore harness internals.
+
+        Returns:
+            ``True`` if a save state was loaded, ``False`` if no save file exists
+            or it could not be parsed.
+        """
+        path = self._save_state_path()
+        if not path.is_file():
+            logger.info(
+                "💾 Save state '%s' not found — starting fresh session.", self.save_id,
+            )
+            return False
+
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            state = SaveState.model_validate(raw)
+        except (json.JSONDecodeError, Exception) as exc:
+            logger.warning("💾 Could not parse save state '%s': %s — starting fresh.", self.save_id, exc)
+            return False
+
+        # Restore harness internals from the serialised state.
+        self.step = state.step
+        self.step_history = list(state.step_history)
+        self.stuck_counter = state.stuck_counter
+        self.last_action = state.last_action
+        self.action_counts = dict(state.action_counts)
+        self._total_steps_across_runs = state.total_steps_across_runs
+        # The step variable itself holds the *start* of this run's range;
+        # the main loop iterates from step+1 onwards.
+        logger.info(
+            "💾 Resumed session '%s' | prior runs: %d | cumulative steps: %d | "
+            "starting at step %d (this run's step counter)",
+            self.save_id,
+            len(state.runs),
+            state.total_steps_across_runs,
+            self.step,
+        )
+
+        # Append a boundary marker so the LLM knows consecutive runs are a
+        # continuation, not a glitch.
+        self.step_history.append(
+            f"--- End of previous run ({state.last_run_id or 'unknown'}). "
+            f"Continuing in a new run session. The game screen should be at the "
+            f"same position. ---"
+        )
+        return True
+
+    def _write_save_state(self) -> None:
+        """Serialize the current harness state to the save-state file.
+
+        Called at the end of a run when ``--save-id`` is set. The saved step
+        is the last completed step so the next run picks up at ``step + 1``.
+        """
+        path = self._save_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Load existing state to accumulate run history and carry forward the
+        # cumulative step count (if a prior run wrote one).
+        runs: list[str] = []
+        prior_total = self._total_steps_across_runs
+        if path.is_file():
+            try:
+                prev = json.loads(path.read_text(encoding="utf-8"))
+                runs = prev.get("runs", [])
+                # Carry forward the prior total so each run adds on top.
+                prior_total = max(prior_total, prev.get("total_steps_across_runs", 0))
+            except (json.JSONDecodeError, Exception):
+                pass
+
+        if self.run_id not in runs:
+            runs.append(self.run_id)
+
+        # Cumulative step count: prior total + steps completed this run.
+        total = prior_total + self.step
+
+        state = SaveState(
+            save_id=self.save_id,  # type: ignore[arg-type]
+            last_run_id=self.run_id,
+            runs=runs,
+            step=self.step,
+            step_history=self.step_history,
+            stuck_counter=self.stuck_counter,
+            last_action=self.last_action,
+            action_counts=self.action_counts,
+            total_steps_across_runs=total,
+            game_save_triggered=self._save_triggered,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        path.write_text(state.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        logger.info(
+            "💾 Wrote save state '%s' at step %d | total across runs: %d | runs: %s",
+            self.save_id, self.step, total, ", ".join(runs),
+        )
 
     # ------------------------------------------------------------------
     # Stuck-state recovery

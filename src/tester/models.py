@@ -14,6 +14,7 @@ class ActionType(str, Enum):
     WAIT = "wait"
     TYPE = "type"
     PRESS = "press"
+    ADVANCE = "advance"
     DONE = "done"
 
 
@@ -51,7 +52,9 @@ class ActionResponse(BaseModel):
         ...,
         description=(
             "The action to take: 'click' to tap UI, 'wait' to pause for animation, "
-            "'type' to input text, 'done' when the game has ended or returned to menu."
+            "'type' to input text, 'advance' to fast-forward plain dialogue/narration "
+            "that continues on click or Space (the harness repeats it until the screen "
+            "changes structurally), 'done' when the game has ended or returned to menu."
         ),
     )
     bounding_box: list[float] | None = Field(
@@ -261,4 +264,52 @@ class GameConfig(BaseModel):
     args: list[str] = Field(
         default_factory=list,
         description="Additional CLI arguments to pass to the game executable.",
+    )
+
+
+class SaveState(BaseModel):
+    """Serialized harness state for save/resume across runs.
+
+    Written to ``<runs-dir>/<save_id>/save_state.json`` when ``--save-id`` is
+    used. A subsequent run with the same ``--save-id`` loads this state and
+    resumes the playthrough where the prior run stopped.
+    """
+
+    save_id: str = Field(
+        ..., description="The --save-id the user passed, identifying this session."
+    )
+    last_run_id: str | None = Field(
+        default=None, description="The run_id of the most recent run in this session."
+    )
+    runs: list[str] = Field(
+        default_factory=list,
+        description="All run_ids that have participated in this session, in order.",
+    )
+    step: int = Field(
+        ..., ge=0, description="The step number the next run should start from."
+    )
+    step_history: list[str] = Field(
+        default_factory=list,
+        description="Full step-history entries from all runs, for LLM context continuity.",
+    )
+    stuck_counter: int = Field(
+        default=0, description="Current stuck-repeat counter at the save boundary."
+    )
+    last_action: str | None = Field(
+        default=None, description="The last action executed before saving."
+    )
+    action_counts: dict[str, int] = Field(
+        default_factory=dict,
+        description="Cumulative action counts across all runs in the session.",
+    )
+    total_steps_across_runs: int = Field(
+        default=0, ge=0, description="Total steps executed across all runs in the session."
+    )
+    game_save_triggered: bool = Field(
+        default=False,
+        description="Whether the harness prompted the LLM to click an in-game save button.",
+    )
+    created_at: str = Field(
+        default="",
+        description="ISO-8601 timestamp when this save state was created/updated.",
     )

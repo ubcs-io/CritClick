@@ -263,6 +263,75 @@ class HarnessSettings(BaseModel):
         default=15.0, ge=0.0, le=120.0,
         description="Maximum seconds to wait for the game window to appear after launch.",
     )
+    save_before_end_steps: int = Field(
+        default=2, ge=1, le=10,
+        description=(
+            "How many steps before max_steps to trigger the save sequence. "
+            "At max_steps - save_before_end_steps, the harness injects a save "
+            "hint into the prompt and after the save action serializes its "
+            "internal state so a subsequent run with the same --save-id can "
+            "resume where this one left off."
+        ),
+    )
+    # -----------------------------------------------------------------
+    # Frame-change detection (VLM-call reduction, all verify-gated)
+    # -----------------------------------------------------------------
+    frame_change_min_delta: float = Field(
+        default=0.02, ge=0.0, le=1.0,
+        description=(
+            "Below this normalised frame delta (0-1), two frames are treated as "
+            "identical ('none') — e.g. a click that had no effect, or a settled "
+            "screen. Drives poll-until-stable waits and no-effect click detection."
+        ),
+    )
+    frame_change_structural_delta: float = Field(
+        default=0.20, ge=0.0, le=1.0,
+        description=(
+            "At or above this normalised frame delta (0-1), a change is treated as "
+            "'structural' (a new screen/choice/scene) that warrants a fresh VLM "
+            "look. Between min and this, changes are 'minor' (dialogue still rolling)."
+        ),
+    )
+    advance_key: str = Field(
+        default="space",
+        description="Key pressed to advance dialogue during the 'advance' macro.",
+    )
+    advance_poll_interval: float = Field(
+        default=0.3, ge=0.0, le=5.0,
+        description="Seconds between frame captures while advancing or polling for stability.",
+    )
+    advance_max_repeats: int = Field(
+        default=4, ge=1, le=50,
+        description=(
+            "Maximum dialogue-advance inputs to issue per 'advance' decision before "
+            "handing control back to the VLM. Keeps the harness re-parsing "
+            "periodically rather than fast-forwarding an entire scene unseen."
+        ),
+    )
+    advance_stable_polls: int = Field(
+        default=2, ge=1, le=10,
+        description=(
+            "How many consecutive 'no change' polls end an advance/wait early "
+            "(dialogue finished or input not consumed)."
+        ),
+    )
+    candidate_fallback: bool = Field(
+        default=True,
+        description=(
+            "If True, when a click leaves the screen unchanged the harness tries the "
+            "next ranked candidate from the same VLM response before spending a new "
+            "VLM call. Reuses work already paid for; falls back to stuck recovery "
+            "only when candidates are exhausted."
+        ),
+    )
+    save_macro_frames: bool = Field(
+        default=True,
+        description=(
+            "If True, intermediate frames captured during an 'advance' macro are "
+            "saved to the screenshot dir so visual-defect coverage isn't lost even "
+            "though those frames skip the VLM look."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -201,6 +201,19 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--save-id",
+        type=str,
+        default=None,
+        help=(
+            "Session identifier for save/resume. When set, the harness saves "
+            "its internal state to <runs-dir>/<save-id>/save_state.json at the "
+            "end of the run (before max_steps). A subsequent run with the same "
+            "--save-id resumes from the saved step, continuing the playthrough "
+            "where the prior run left off. Multiple runs using the same "
+            "--save-id are threaded into a single session."
+        ),
+    )
+    parser.add_argument(
         "--mobile",
         action="store_true",
         help=(
@@ -709,6 +722,7 @@ def main(argv: list[str] | None = None) -> None:
             runs_dir=args.runs_dir,
             debug_harness=args.debug_harness,
             debug_screen=args.debug_screen,
+            save_id=args.save_id,
         )
         exit_code = harness.run()
     finally:

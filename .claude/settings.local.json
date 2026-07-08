@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python3 /private/tmp/claude-501/-Users-romanrheingans-Documents-Projects-tester/f554252a-7ffa-4c8c-a179-a6b91851f1b2/scratchpad/e2e_recap.py)"
+      "Bash(python3 /private/tmp/claude-501/-Users-romanrheingans-Documents-Projects-tester/f554252a-7ffa-4c8c-a179-a6b91851f1b2/scratchpad/e2e_recap.py)",
+      "Bash(python -m pytest tests/test_harness.py -q)"
     ]
   }
 }

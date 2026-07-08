@@ -4,13 +4,15 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
+from PIL import Image
 
 from tester.client import LLMClient
 from tester.harness import Harness
-from tester.models import ActionResponse
+from tester.models import ActionResponse, ActionType, Candidate
+from tester.perception import classify_change, frame_delta, frame_signature
 
 
 class TestCoordinateValidation:
@@ -754,3 +756,335 @@ class TestCoordinateCalibration:
 
         harness._calibrate_coordinates()
         harness.capturer.set_coordinate_calibration.assert_not_called()
+
+
+class TestSaveResume:
+    """Tests for the save / resume state machinery."""
+
+    def _make_dry_harness(self, settings, save_id=None):
+        launcher = MagicMock()
+        client = MagicMock(spec=LLMClient)
+        harness = Harness(
+            settings, launcher, client, dry_run=True, save_id=save_id,
+            runs_dir="/tmp/test_runs",
+        )
+        harness.capturer = MagicMock()
+        harness.capturer.scale = 1.0
+        harness.capturer.scale_coordinates.side_effect = lambda x, y: (int(x), int(y))
+        return harness
+
+    def test_save_trigger_step_default(self, sample_settings):
+        """With max_steps=5 and default save_before_end_steps=2 → trigger at step 3."""
+        harness = self._make_dry_harness(sample_settings)
+        assert harness._save_trigger_step == 3  # 5 - 2
+
+    def test_save_trigger_step_custom_offset(self, sample_settings):
+        """Offset of 1 → trigger at step 4 (max_steps=5, 5-1=4)."""
+        sample_settings.harness.save_before_end_steps = 1
+        harness = self._make_dry_harness(sample_settings)
+        assert harness._save_trigger_step == 4
+
+    def test_save_trigger_step_clamped(self, sample_settings):
+        """Offset of 10 → trigger at step 1 (clamped)."""
+        sample_settings.harness.save_before_end_steps = 10
+        harness = self._make_dry_harness(sample_settings)
+        assert harness._save_trigger_step == 1
+
+    def test_save_state_path(self, sample_settings):
+        harness = self._make_dry_harness(sample_settings, save_id="my-session")
+        assert harness._save_state_path() == Path("/tmp/test_runs/my-session/save_state.json")
+
+    def test_write_and_load_save_state(self, sample_settings, tmp_path):
+        """Round-trip: write save state, load it back, state matches."""
+        harness = self._make_dry_harness(sample_settings, save_id="test-session")
+        harness.runs_dir = tmp_path
+        harness.step = 42
+        harness.step_history = ["Step 1 [CLICK]: Start", "Step 2 [WAIT]: Pause"]
+        harness.stuck_counter = 2
+        harness.last_action = "click"
+        harness.action_counts = {"click": 10, "wait": 32}
+        harness._total_steps_across_runs = 0
+        harness._save_triggered = True
+        harness.save_id = "test-session"
+        harness.run_id = "run-abc"
+
+        # Write
+        harness._write_save_state()
+        path = harness._save_state_path()
+        assert path.is_file()
+
+        # Load fresh harness
+        harness2 = self._make_dry_harness(sample_settings, save_id="test-session")
+        harness2.runs_dir = tmp_path
+        loaded = harness2._load_save_state()
+        assert loaded is True
+        assert harness2.step == 42
+        assert len(harness2.step_history) == 3  # 2 steps + boundary marker
+        assert harness2.stuck_counter == 2
+        assert harness2.last_action == "click"
+        assert harness2.action_counts == {"click": 10, "wait": 32}
+        assert harness2._total_steps_across_runs == 42
+        assert "run-abc" in json.loads(path.read_text())["runs"]
+
+    def test_load_save_state_missing_file(self, sample_settings, tmp_path):
+        """No save file → returns False, no error."""
+        harness = self._make_dry_harness(sample_settings, save_id="no-file")
+        harness.runs_dir = tmp_path
+        loaded = harness._load_save_state()
+        assert loaded is False
+
+    def test_load_save_state_corrupt_file(self, sample_settings, tmp_path):
+        """Corrupt JSON → returns False, logged warning."""
+        (tmp_path / "bad-session").mkdir()
+        (tmp_path / "bad-session" / "save_state.json").write_text("{not json!!!")
+        harness = self._make_dry_harness(sample_settings, save_id="bad-session")
+        harness.runs_dir = tmp_path
+        loaded = harness._load_save_state()
+        assert loaded is False
+
+    def test_save_step_breaks_loop(self, sample_settings):
+        """When _save_triggered is set, the run() loop breaks with 'saved' reason."""
+        sample_settings.harness.max_steps = 5  # trigger at step 3
+        harness = self._make_dry_harness(sample_settings, save_id="break-test")
+        harness.capturer.capture_pil.return_value = MagicMock()
+        # Override _load_save_state to not modify step
+        harness._load_save_state = MagicMock(return_value=False)
+
+        # Patch analyze_and_act to just set _save_triggered on step 3
+        original = harness.analyze_and_act
+        def fake_analyze():
+            if harness.step == harness._save_trigger_step:
+                harness._save_triggered = True
+                return "clicked"
+            return "waited"
+        harness.analyze_and_act = fake_analyze
+
+        harness.runs_dir = Path(tempfile.mkdtemp())
+        try:
+            harness.run()
+        finally:
+            # Clean up
+            import shutil
+            shutil.rmtree(harness.runs_dir, ignore_errors=True)
+
+        assert harness.completion_reason == "saved"
+
+    def test_resume_loop_starts_from_one(self, sample_settings):
+        """The run() loop always starts from step 1 (per-run counter).
+        
+        The cumulative step count across runs is tracked in
+        _total_steps_across_runs, written into the save state and manifest.
+        The per-run step counter resets to 1 for each invocation.
+        """
+        harness = self._make_dry_harness(sample_settings, save_id="resume-test")
+        harness.capturer.capture_pil.return_value = MagicMock()
+        harness._total_steps_across_runs = 100
+
+        # Simulate a loaded state from a prior run. The loop resets step to 1.
+        harness.step = 100
+        harness.step_history = [f"Step {i} [CLICK]: ..." for i in range(1, 101)]
+        harness._load_save_state = MagicMock(return_value=True)
+        harness._write_save_state = MagicMock()
+
+        step_history = []
+        def fake_analyze():
+            step_history.append(harness.step)
+            return "waited"
+        harness.analyze_and_act = fake_analyze
+
+        harness.runs_dir = Path(tempfile.mkdtemp())
+        try:
+            harness.run()
+        finally:
+            import shutil
+            shutil.rmtree(harness.runs_dir, ignore_errors=True)
+
+        # The per-run loop resets step to 1. max_steps=5 → runs 5 steps.
+        assert step_history == [1, 2, 3, 4, 5]
+        assert harness.completion_reason == "max_steps_reached"
+        # Cumulative total is still tracked internally.
+        assert harness._total_steps_across_runs == 100
+
+    def test_save_id_without_resume_writes_state(self, sample_settings, tmp_path):
+        """Fresh run with save_id writes state on completion."""
+        harness = self._make_dry_harness(sample_settings, save_id="fresh-session")
+        harness.capturer.capture_pil.return_value = MagicMock()
+        harness.runs_dir = tmp_path
+        harness._load_save_state = MagicMock(return_value=False)  # no prior state
+        harness.step = 3  # simulate some steps
+
+        harness._write_save_state()
+        path = tmp_path / "fresh-session" / "save_state.json"
+        assert path.is_file()
+        data = json.loads(path.read_text())
+        assert data["save_id"] == "fresh-session"
+        assert data["step"] == 3
+        assert data["total_steps_across_runs"] == 3
+
+    def test_two_runs_accumulate_run_ids(self, sample_settings, tmp_path):
+        """Writing state twice with different run_ids records both."""
+        harness1 = self._make_dry_harness(sample_settings, save_id="acc-session")
+        harness1.runs_dir = tmp_path
+        harness1.step = 20
+        harness1.run_id = "run-1"
+        harness1._write_save_state()
+
+        harness2 = self._make_dry_harness(sample_settings, save_id="acc-session")
+        harness2.runs_dir = tmp_path
+        harness2.step = 15
+        harness2.run_id = "run-2"
+        harness2._write_save_state()
+
+        path = tmp_path / "acc-session" / "save_state.json"
+        data = json.loads(path.read_text())
+        assert data["runs"] == ["run-1", "run-2"]
+        # Total: run-1 had 20, run-2 accumulated another 15 = 35
+        assert data["total_steps_across_runs"] == 35
+
+
+# ---------------------------------------------------------------------------
+# Frame-change detector (perception.py)
+# ---------------------------------------------------------------------------
+
+def _gray(value: int, size: int = 32) -> Image.Image:
+    """A uniform grayscale image; delta between two is |Δvalue|/255."""
+    return Image.new("L", (size, size), value)
+
+
+class TestPerception:
+    def test_identical_frames_zero_delta(self):
+        a = frame_signature(_gray(100))
+        b = frame_signature(_gray(100))
+        assert frame_delta(a, b) == 0.0
+
+    def test_delta_scales_with_difference(self):
+        a = frame_signature(_gray(100))
+        b = frame_signature(_gray(120))
+        # mean abs diff 20, normalised: 20/255 ≈ 0.078
+        assert frame_delta(a, b) == pytest.approx(20 / 255, abs=1e-3)
+
+    def test_signature_is_resolution_independent(self):
+        # Different source sizes reduce to the same signature size, so a
+        # uniform-colour frame compares equal regardless of capture dimensions.
+        a = frame_signature(_gray(100, size=64))
+        b = frame_signature(_gray(100, size=200))
+        assert a.size == b.size == (32, 32)
+        assert frame_delta(a, b) == 0.0
+
+    def test_classify_buckets(self):
+        assert classify_change(0.0, 0.02, 0.20) == "none"
+        assert classify_change(0.01, 0.02, 0.20) == "none"
+        assert classify_change(0.08, 0.02, 0.20) == "minor"
+        assert classify_change(0.20, 0.02, 0.20) == "structural"
+        assert classify_change(0.5, 0.02, 0.20) == "structural"
+
+
+# ---------------------------------------------------------------------------
+# Advance macro + candidate fallback (harness.py)
+# ---------------------------------------------------------------------------
+
+def _live_harness(sample_settings, capture_values):
+    """A non-dry-run harness whose capturer yields scripted grayscale frames."""
+    # Fast, deterministic knobs — no real sleeps, no disk writes.
+    h = sample_settings.harness
+    h.advance_poll_interval = 0.0
+    h.advance_max_repeats = 4
+    h.advance_stable_polls = 2
+    h.frame_change_min_delta = 0.02
+    h.frame_change_structural_delta = 0.20
+    h.candidate_fallback = True
+    h.save_macro_frames = False
+
+    launcher = MagicMock()
+    client = MagicMock(spec=LLMClient)
+    harness = Harness(sample_settings, launcher, client, dry_run=False)
+    harness.capturer = MagicMock()
+    harness.capturer.scale = 1.0
+    harness.capturer.scale_coordinates.side_effect = lambda x, y: (int(x), int(y))
+    harness.capturer.capture_pil.side_effect = [_gray(v) for v in capture_values]
+    return harness, client
+
+
+class TestAdvanceMacro:
+    def test_advance_collapses_multiple_lines_until_settled(self, sample_settings):
+        # initial + minor + minor + settle(none, none) → 5 captures, 4 presses.
+        harness, client = _live_harness(sample_settings, [100, 120, 140, 140, 140])
+        resp = ActionResponse(
+            description="Dialogue", action="advance",
+            reasoning="Just narration", narrative="Advancing",
+        )
+        with patch("tester.harness.pyautogui.press") as mock_press:
+            result = harness._execute(resp)
+        assert result == "advanced"
+        # One VLM decision fast-forwarded several lines with NO extra VLM call.
+        assert mock_press.call_count == 4
+        client.analyze.assert_not_called()
+
+    def test_advance_stops_on_structural_change(self, sample_settings):
+        # initial + minor + structural → stop; only 2 presses.
+        harness, client = _live_harness(sample_settings, [100, 120, 200])
+        resp = ActionResponse(
+            description="Dialogue", action="advance",
+            reasoning="Narration", narrative="Advancing",
+        )
+        with patch("tester.harness.pyautogui.press") as mock_press:
+            result = harness._execute(resp)
+        assert result == "advanced"
+        assert mock_press.call_count == 2
+
+    def test_advance_dry_run_presses_once(self, sample_settings):
+        launcher = MagicMock()
+        client = MagicMock(spec=LLMClient)
+        harness = Harness(sample_settings, launcher, client, dry_run=True)
+        resp = ActionResponse(
+            description="Dialogue", action="advance",
+            reasoning="Narration", narrative="Advancing",
+        )
+        # No screen interaction in dry-run.
+        assert harness._execute(resp) == "advanced"
+
+
+class TestCandidateFallback:
+    def test_no_effect_click_tries_next_candidate(self, sample_settings):
+        # pre=A, then 3 unchanged polls (no effect), candidate click, then B (changed).
+        harness, client = _live_harness(
+            sample_settings, [100, 100, 100, 100, 200]
+        )
+        with patch("tester.harness.pyautogui.size", return_value=(1280, 720)):
+            resp = ActionResponse(
+                description="Menu",
+                action="click",
+                bounding_box=[90.0, 190.0, 110.0, 210.0],
+                candidates=[
+                    Candidate(label="primary", bbox=[90.0, 190.0, 110.0, 210.0],
+                              action=ActionType.CLICK, relevance="primary"),
+                    Candidate(label="secondary", bbox=[200.0, 200.0, 220.0, 220.0],
+                              action=ActionType.CLICK, relevance="secondary"),
+                ],
+                reasoning="click", narrative="Clicked",
+            )
+            result = harness._execute(resp)
+        assert result == "clicked"
+        # Primary click + fallback candidate click = two clicks, zero new VLM calls.
+        assert harness.capturer.click.call_count == 2
+        client.analyze.assert_not_called()
+
+    def test_effective_click_skips_fallback(self, sample_settings):
+        # pre=A, then first poll shows B (changed) → no fallback click.
+        harness, client = _live_harness(sample_settings, [100, 200])
+        with patch("tester.harness.pyautogui.size", return_value=(1280, 720)):
+            resp = ActionResponse(
+                description="Menu",
+                action="click",
+                bounding_box=[90.0, 190.0, 110.0, 210.0],
+                candidates=[
+                    Candidate(label="primary", bbox=[90.0, 190.0, 110.0, 210.0],
+                              action=ActionType.CLICK, relevance="primary"),
+                    Candidate(label="secondary", bbox=[200.0, 200.0, 220.0, 220.0],
+                              action=ActionType.CLICK, relevance="secondary"),
+                ],
+                reasoning="click", narrative="Clicked",
+            )
+            result = harness._execute(resp)
+        assert result == "clicked"
+        assert harness.capturer.click.call_count == 1

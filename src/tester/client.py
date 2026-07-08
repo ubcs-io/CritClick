@@ -451,8 +451,8 @@ class OpenAIClient(LLMClient):
         import re
 
         return re.sub(
-            r"Recent narrative context:\n.*?\n\nFollow the WORKFLOW",
-            "Recent narrative context:\n[...]\n\nFollow the WORKFLOW",
+            r"===== YOUR RECENT ACTIONS \(most recent last\) =====\n.*?\n===== END OF HISTORY =====",
+            "===== YOUR RECENT ACTIONS (most recent last) =====\n[...]\n===== END OF HISTORY =====",
             user_prompt,
             flags=re.DOTALL,
         )
